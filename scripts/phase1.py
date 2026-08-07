@@ -20,15 +20,37 @@ from aivionics.parsers.boeing import classify_function
 
 
 def upsert_manual(con, oem, actype, mtype, doc_std, source, revision):
+    """Return the manual id, wiped clean and marked current.
+
+    Re-ingesting the SAME revision reuses its row and clears its dependent
+    rows, so a re-run replaces rather than accumulates. A genuinely new
+    revision gets a new row and the old one is retained but not current
+    (PLAN §4: exactly one is_current per aircraft_type+manual_type,
+    superseded revisions retained).
+    """
     con.execute(
         "UPDATE manual SET is_current=0 WHERE aircraft_type=? AND manual_type=?",
         (actype, mtype))
+    row = con.execute(
+        "SELECT id FROM manual WHERE oem=? AND aircraft_type=? AND manual_type=?"
+        " AND revision IS ?", (oem, actype, mtype, revision)).fetchone()
+    now = datetime.now(timezone.utc).isoformat()
+    if row:
+        mid = row[0]
+        con.execute("DELETE FROM task_section WHERE task_id IN "
+                    "(SELECT id FROM task WHERE manual_id=?)", (mid,))
+        con.execute("DELETE FROM task_link WHERE from_task_id IN "
+                    "(SELECT id FROM task WHERE manual_id=?)", (mid,))
+        con.execute("DELETE FROM task WHERE manual_id=?", (mid,))
+        con.execute("DELETE FROM coverage WHERE manual_id=?", (mid,))
+        con.execute("UPDATE manual SET is_current=1, source_file=?, ingested_at=?"
+                    " WHERE id=?", (str(source), now, mid))
+        return mid
     cur = con.execute(
         "INSERT INTO manual(oem,aircraft_type,manual_type,doc_standard,"
         "parser_plugin,revision,is_current,source_file,ingested_at) "
         "VALUES(?,?,?,?,?,?,1,?,?)",
-        (oem, actype, mtype, doc_std, oem, revision, str(source),
-         datetime.now(timezone.utc).isoformat()))
+        (oem, actype, mtype, doc_std, oem, revision, str(source), now))
     return cur.lastrowid
 
 
@@ -36,16 +58,17 @@ def run_amm(con) -> None:
     parser = get_parser("boeing")
     mid = upsert_manual(con, "boeing", "737-8", "AMM", "ispec2200",
                         config.AMM_DIR, "2018-02-27")
-    con.execute("DELETE FROM task_section WHERE task_id IN "
-                "(SELECT id FROM task WHERE manual_id=?)", (mid,))
-    con.execute("DELETE FROM task WHERE manual_id=?", (mid,))
     total = 0
+    dupes = 0
+    failed = []
     for pdf in sorted(config.AMM_DIR.glob("*.pdf")):
         ch = pdf.name[:2]
         try:
             tasks, mentions = parser.extract_chapter(pdf)
         except Exception as e:
-            print(f"  ch {ch}: EXTRACTION FAILED — {e}", flush=True)
+            print(f"  ch {ch}: EXTRACTION FAILED — {e}",
+                  file=sys.stderr, flush=True)
+            failed.append(ch)
             con.execute("INSERT OR REPLACE INTO coverage VALUES(?,?,?,?,?)",
                         (mid, ch, 0, 0, 0.0))
             continue
@@ -64,8 +87,10 @@ def run_amm(con) -> None:
                                       t.ata_subject, t.title),
                  int(bool(t.warnings)), int(bool(t.cautions)),
                  len(t.warnings), len(t.cautions)))
-            tid = cur.lastrowid
-            if tid:
+            if cur.rowcount != 1:      # duplicate task_number, row ignored
+                dupes += 1
+            else:
+                tid = cur.lastrowid
                 for i, w in enumerate(t.warnings):
                     con.execute("INSERT INTO task_section(task_id,seq,kind,text)"
                                 " VALUES(?,?,?,?)", (tid, i, "warning", w))
@@ -79,10 +104,16 @@ def run_amm(con) -> None:
         con.execute("INSERT OR REPLACE INTO coverage VALUES(?,?,?,?,?)",
                     (mid, ch, mentions, len(tasks), pct))
         total += len(tasks)
-        print(f"  ch {ch}: {len(tasks)} tasks / {mentions} mentioned "
+        print(f"  ch {ch}: {len(tasks)} tasks / {mentions} in TOC "
               f"({pct}%)", flush=True)
     con.commit()
-    print(f"AMM total tasks: {total}")
+    stored = con.execute("SELECT COUNT(*) FROM task WHERE manual_id=?",
+                         (mid,)).fetchone()[0]
+    print(f"AMM total tasks extracted: {total} · stored: {stored} · "
+          f"duplicate numbers ignored: {dupes}")
+    if failed:
+        print(f"UNREADABLE CHAPTERS (coverage 0): {', '.join(failed)}",
+              file=sys.stderr, flush=True)
 
 
 def run_fim(con) -> None:
@@ -103,7 +134,7 @@ def run_fim(con) -> None:
 
     mid = upsert_manual(con, "boeing", "737-8", "FIM", "metadata",
                         nav, "2017-08-15")
-    con.execute("DELETE FROM task WHERE manual_id=?", (mid,))
+
     for tn, info in urls.items():
         core = tn[1:] if tn[0].isalpha() else tn
         ch, sec, subj, func, seq = core.split("-")

@@ -173,6 +173,40 @@ CREATE TABLE IF NOT EXISTS label_silver(
     split TEXT                         -- train|test
 );
 CREATE INDEX IF NOT EXISTS ix_silver_defect ON label_silver(defect_id);
+-- Phase 0.5 outcome linkage. A pair is linked when the same tail reports the
+-- same ATA chapter twice inside the window. days_apart carries the actual gap
+-- so the 30d and 90d variants are one table, not two.
+CREATE TABLE IF NOT EXISTS repeat_link(
+    defect_id INTEGER NOT NULL REFERENCES defect(id),
+    repeat_defect_id INTEGER NOT NULL REFERENCES defect(id),
+    days_apart INTEGER NOT NULL,
+    same_tail INTEGER NOT NULL,
+    same_ata INTEGER NOT NULL,
+    PRIMARY KEY(defect_id, repeat_defect_id)
+);
+CREATE INDEX IF NOT EXISTS ix_repeat_days ON repeat_link(days_apart);
+
+-- Phase 0.8 stratified frequency baseline (train split only — the baseline
+-- Gate 2 must beat, so it may never see test data).
+CREATE TABLE IF NOT EXISTS baseline_freq(
+    ata_chapter TEXT NOT NULL,
+    task_number TEXT NOT NULL,
+    cnt INTEGER NOT NULL,
+    rank INTEGER NOT NULL,
+    PRIMARY KEY(ata_chapter, task_number)
+);
+
+-- Phase 0.7 adjudication queue (the UI reads this; see build_gold_queue.py)
+CREATE TABLE IF NOT EXISTS gold_queue(
+    id INTEGER PRIMARY KEY,
+    defect_id INTEGER NOT NULL REFERENCES defect(id),
+    task_number TEXT NOT NULL,
+    stratum TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(defect_id, task_number)
+);
+
 CREATE TABLE IF NOT EXISTS label_gold(
     id INTEGER PRIMARY KEY,
     defect_id INTEGER NOT NULL REFERENCES defect(id),
@@ -263,6 +297,9 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or config.DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path))
+    # Phase 0/1 ingest holds long write transactions while other processes
+    # read; wait rather than fail instantly on a locked database.
+    con.execute("PRAGMA busy_timeout=60000")
     con.executescript(SCHEMA)
     con.execute("PRAGMA foreign_keys=ON")
     return con
