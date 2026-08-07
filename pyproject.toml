@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AIvionics - reliability analysis and manual retrieval for avionics engineering"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy",
     "fastembed",
     "flashrank",
     "sqlite-vec",
