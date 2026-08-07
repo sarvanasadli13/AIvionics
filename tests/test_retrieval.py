@@ -271,6 +271,37 @@ def test_jasc_boost_is_soft_and_never_excludes_other_chapters(indexed, embedder)
     assert any(r.task_number.startswith("23-") for r in run.results[:5])
 
 
+def test_six_group_engine_task_numbers_resolve_exactly(tmp_path, embedder):
+    """Engine chapters (71/73/75/77/79) carry a 6th group — 71-00-00-800-801-G00.
+    The token patterns here are five-group shaped, so the trailing group must
+    still reach FTS as its own phrase and the exact number must win."""
+    con = db.connect(tmp_path / "engine.db")
+    mid = con.execute(
+        "INSERT INTO manual(oem,aircraft_type,manual_type,doc_standard,revision,"
+        "is_current) VALUES('boeing','737-8','AMM','ispec2200','48',1)").lastrowid
+    for tn, title in [("71-00-00-800-801-G00", "POWER PLANT - ADJUSTMENT"),
+                      ("71-00-00-800-802-G00", "POWER PLANT - TEST"),
+                      ("34-11-01-400-801", "PITOT PROBE - REMOVAL")]:
+        ch, sec, subj = tn.split("-")[:3]
+        con.execute(
+            "INSERT INTO task(manual_id,task_number,function_code,title,ata_chapter,"
+            "ata_section,ata_subject,body,catalogue_only,embed_text)"
+            " VALUES(?,?,?,?,?,?,?,'body',0,?)",
+            (mid, tn, tn.split("-")[3], title, ch, sec, subj,
+             ata.build_embed_text(ch, sec, subj, title)))
+    con.commit()
+    indexer.build_all(con, embedder)
+
+    target = "71-00-00-800-801-G00"
+    match = build_fts_match(f"ENGINE ADJUSTMENT DONE IAW {target}")
+    assert '"71 00 00 800 801 g00"' in match      # the full six-group phrase
+    run = Searcher(con, embedder).search(f"ENGINE ADJUSTMENT DONE IAW {target}")
+    assert run.results[0].task_number == target
+    # relaxed matching still means chapter-section-subject + function code
+    assert evalharness.relaxed_key(target) == "71-00-00-800"
+    con.close()
+
+
 def test_task_results_are_locators_not_bodies(indexed, embedder):
     s = _searcher(indexed, embedder)
     run = s.search("PITOT PROBE REMOVAL", jasc="34")
