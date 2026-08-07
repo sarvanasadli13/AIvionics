@@ -1,0 +1,12 @@
+# data is downloaded / generated, never committed
+data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.playwright-mcp/

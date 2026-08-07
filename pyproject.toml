@@ -1,0 +1,29 @@
+[project]
+name = "aivionics"
+version = "0.1.0"
+description = "AIvionics - reliability analysis and manual retrieval for avionics engineering"
+requires-python = ">=3.11"
+dependencies = [
+    "fastembed",
+    "flashrank",
+    "sqlite-vec",
+    "PySide6",
+    "pyqtgraph",
+    "bcrypt",
+    "timezonefinder",
+    "pymupdf",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
