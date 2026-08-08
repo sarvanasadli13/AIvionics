@@ -308,6 +308,14 @@ class DiagnosePage(Page):
         self.cases.currentCellChanged.connect(self._on_case_selected)
         lay.addWidget(self.cases, 1)
 
+        self.summary = QLabel("")
+        self.summary.setWordWrap(True)
+        self.summary.setFont(ui_font(9))
+        self.summary.setObjectName("Muted")
+        self.summary.setContentsMargins(11, 8, 11, 4)
+        self.summary.hide()
+        lay.addWidget(self.summary)
+
         self.notes = NotesPanel(self.ctx, show_anchor=False)
         self.notes.setMaximumHeight(300)
         lay.addWidget(self.notes)
@@ -373,6 +381,7 @@ class DiagnosePage(Page):
         self._last_run = run
         self._render_locators(run, abstain=result.get("abstain", False))
         self._render_cases(result["case_rows"])
+        self._render_summary(result.get("summary"))
         kind = "exact token" if run.exact_query else "free text"
         note = result.get("calibration_note", "")
         if not result.get("calibrated"):
@@ -450,6 +459,21 @@ class DiagnosePage(Page):
             "revision": prov.get("manual_revision"),
         }
         self.ctx.print_locator(task, manual)
+
+    def _render_summary(self, summary) -> None:
+        """Show a case summary only when it survived validation.
+
+        A rejected summary is dropped rather than repaired: editing it would
+        leave a sentence that reads as grounded when part of it was removed.
+        The cases themselves are already on screen and remain the evidence.
+        """
+        if summary is None or not summary.accepted or summary.insufficient:
+            self.summary.hide()
+            return
+        self.summary.setText(
+            f"Summary of the cases below — {summary.model}, extractive, "
+            f"checked against the records: {summary.text}")
+        self.summary.show()
 
     def _on_case_selected(self, row: int, *_args) -> None:
         """Anchor the notes panel to the selected case.

@@ -125,6 +125,8 @@ class SearchService:
         self.index_version = index_version or config.INDEX_VERSION
         self._searcher = None
         self._calibrator = None
+        self._llm = None
+        self._llm_tried = False
         self._con: sqlite3.Connection | None = None
         self._pool = QThreadPool.globalInstance()
         self.busy = False
@@ -160,6 +162,22 @@ class SearchService:
                                                self.index_version)
         return self._calibrator
 
+    def llm(self):
+        """The optional summariser, or None. Probed once.
+
+        A missing or unreachable model is an ordinary state: the whole screen
+        works without it, so failure here must never propagate to the search.
+        """
+        if not self._llm_tried:
+            self._llm_tried = True
+            try:
+                from ..llm.client import OllamaClient
+                client = OllamaClient()
+                self._llm = client if client.health().ok else None
+            except Exception:                                    # noqa: BLE001
+                self._llm = None
+        return self._llm
+
     def status(self) -> IndexStatus:
         try:
             return index_status(self._connect(), self.index_version)
@@ -169,7 +187,7 @@ class SearchService:
 
     # ── one query ────────────────────────────────────────────────────────
     def run(self, query: str, *, top_k: int = 20, cases_k: int = 12,
-            jasc: str | None = None) -> dict:
+            jasc: str | None = None, summarise_cases: bool = True) -> dict:
         """Blocking search. Called on the worker thread, never on the UI one."""
         searcher = self.searcher()
         tasks = searcher.search(query, kind="task", top_k=top_k, rerank=False,
@@ -190,11 +208,23 @@ class SearchService:
         chapter = tasks.results[0].ata_chapter if tasks.results else None
         abstain = bool(tasks.results) and cal.should_abstain(
             chapter, tasks.confidence)
+        ordered_cases = [rows[i] for i in ids if i in rows]
+        summary = None
+        if summarise_cases:
+            from ..llm.summarise import summarise_cases as _summarise
+            summary = _summarise(
+                self.llm(), query,
+                [{"tail": c.tail, "reported_at": c.reported_at,
+                  "replaced": c.replaced, "found": c.found}
+                 for c in ordered_cases[:6]],
+                allowed_tasks={r.task_number for r in tasks.results
+                               if r.task_number})
         return {
             "query": query,
             "tasks": tasks,
             "cases": cases,
-            "case_rows": [rows[i] for i in ids if i in rows],
+            "case_rows": ordered_cases,
+            "summary": summary,
             "abstain": abstain,
             "calibrated": cal.fitted,
             "calibration_note": cal.explain(chapter),

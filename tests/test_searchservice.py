@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aivionics import db
-from aivionics.ui.searchservice import case_rows, index_status
+from aivionics.ui.searchservice import CaseRow, case_rows, index_status
 
 
 def _seed_defect(con, did=1, tail="N123AB", at="2025-03-04",
@@ -126,3 +126,58 @@ def test_no_machine_token_reaches_the_applicability_label():
         assert token in APPLICABILITY_TEXT, f"unmapped applicability: {token}"
     for text in APPLICABILITY_TEXT.values():
         assert "_" not in text
+
+
+# ── the whole run(), which had no coverage until it broke ────────────────
+def test_run_returns_every_key_the_page_reads(tmp_path, monkeypatch):
+    """A regression test for a NameError that reached a live render.
+
+    `run()` assembles the dict the Diagnose page unpacks, and nothing exercised
+    it: a local named `case_rows` shadowed the module function of the same
+    name, so the first real call raised UnboundLocalError. Unit tests on the
+    parts could not catch that — only calling the whole thing does.
+    """
+    from aivionics.retrieval.embedder import FakeEmbedder
+    from aivionics.retrieval.indexer import build_all
+    from aivionics.ui.searchservice import SearchService
+
+    path = tmp_path / "s.db"
+    con = db.connect(path)
+    con.execute("INSERT INTO manual(id,oem,aircraft_type,manual_type,revision)"
+                " VALUES(1,'boeing','737-8','AMM','48')")
+    for i in range(6):
+        con.execute(
+            "INSERT INTO task(manual_id,task_number,title,ata_chapter,"
+            "ata_section,ata_subject,embed_text) VALUES(1,?,?,?,?,?,?)",
+            (f"34-11-{i:02d}-400-801", f"Pitot probe variant {i}", "34",
+             "11", f"{i:02d}", f"Navigation > 34-11-{i:02d} > Pitot probe {i}"))
+    for i in range(4):
+        _seed_defect(con, did=i + 1, tail=f"N{i}00AV")
+    con.execute("INSERT INTO label_silver(defect_id,task_number,leak_free,split)"
+                " VALUES(1,'34-11-00-400-801',1,'test')")
+    con.commit()
+
+    embedder = FakeEmbedder()
+    build_all(con, embedder)
+    con.commit()
+    con.close()
+
+    service = SearchService(path, index_version=embedder.index_version)
+    monkeypatch.setattr(service, "searcher", lambda: __import__(
+        "aivionics.retrieval.search", fromlist=["Searcher"]
+    ).Searcher(service._connect(), embedder,
+               index_version=embedder.index_version))
+    # no model on a test machine, and the search must not depend on one
+    monkeypatch.setattr(service, "llm", lambda: None)
+
+    result = service.run("AIRSPEED UNRELIABLE ON TAKEOFF", top_k=5)
+    for key in ("query", "tasks", "cases", "case_rows", "abstain",
+                "calibrated", "calibration_note", "chapter", "summary"):
+        assert key in result, f"the page reads {key!r} and run() did not set it"
+    assert result["query"].startswith("AIRSPEED")
+    assert isinstance(result["case_rows"], list)
+    assert all(isinstance(r, CaseRow) for r in result["case_rows"])
+    # uncalibrated install: answer rather than suppress everything
+    assert result["abstain"] is False
+    assert result["summary"] is None or result["summary"].accepted is False
+    service.close()
