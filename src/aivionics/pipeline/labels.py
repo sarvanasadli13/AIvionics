@@ -35,22 +35,39 @@ def parse_date(s: str | None):
 
 
 def build(con: sqlite3.Connection, batch: int = 50000) -> dict:
-    """Populate defect + label_silver from sdr_raw. Idempotent (skips done)."""
-    done = con.execute("SELECT COUNT(*) FROM defect").fetchone()[0]
-    if done:
-        print(f"  defect rows already built: {done:,}")
-        return summary(con)
+    """Populate defect + label_silver from sdr_raw.
 
+    Resumable by stage: each of defects / silver labels / tiers is skipped
+    only if it is already complete, so a failure in a later stage does not
+    discard the earlier ones on the next run.
+    """
     whitelist = references.load_function_whitelist(con)
     if not whitelist:
         raise RuntimeError("function-code whitelist empty — run Phase 1 first")
     print(f"  function-code whitelist: {sorted(whitelist)[:12]}... "
           f"({len(whitelist)} codes)")
 
+    if con.execute("SELECT COUNT(*) FROM defect").fetchone()[0] == 0:
+        _build_defects(con, batch)
+    else:
+        print("  defects: already built, skipping")
+
+    if con.execute("SELECT COUNT(*) FROM label_silver").fetchone()[0] == 0:
+        _build_silver(con, whitelist, batch)
+    else:
+        print("  silver labels: already built, skipping")
+
+    if con.execute("SELECT COUNT(*) FROM label_silver "
+                   "WHERE confidence_tier IS NULL").fetchone()[0]:
+        _tier(con)
+    return summary(con)
+
+
+def _build_defects(con: sqlite3.Connection, batch: int) -> None:
     cur = con.execute(
         "SELECT id, source_year, difficulty_date, tail, jasc_code, "
         "part_name, part_number, discrepancy FROM sdr_raw")
-    d_rows, s_rows, n = [], [], 0
+    d_rows, n = [], 0
     while True:
         chunk = cur.fetchmany(batch)
         if not chunk:
@@ -69,11 +86,14 @@ def build(con: sqlite3.Connection, batch: int = 50000) -> dict:
         print(f"  defects: {n:,}", flush=True)
     con.commit()
 
-    # silver labels from citations in the RECTIFICATION side (post-split)
+
+def _build_silver(con: sqlite3.Connection, whitelist: set[str],
+                  batch: int) -> None:
+    """Silver labels from citations in the RECTIFICATION side (post-split)."""
     cur = con.execute(
         "SELECT d.id, d.defect_text, d.rectification_text, d.sdr_year, "
         "s.discrepancy FROM defect d JOIN sdr_raw s ON s.id=d.sdr_id")
-    n = 0
+    s_rows, n = [], 0
     while True:
         chunk = cur.fetchmany(batch)
         if not chunk:
@@ -94,30 +114,37 @@ def build(con: sqlite3.Connection, batch: int = 50000) -> dict:
                 "function_code,leak_free,split) VALUES(?,?,?,?,?,?)", s_rows)
             n += len(s_rows)
             s_rows = []
+            print(f"  silver labels: {n:,}", flush=True)
     con.commit()
 
-    _tier(con)
-    return summary(con)
 
-
-def _tier(con: sqlite3.Connection) -> None:
+def _tier(con: sqlite3.Connection, chunk: int = 50000) -> None:
     """HIGH: root-cause language, no NFF. LOW: NFF language or replaced+NFF.
-    MED: everything else with a citation."""
-    rows = con.execute(
-        "SELECT ls.id, d.rectification_text, d.defect_text "
-        "FROM label_silver ls JOIN defect d ON d.id=ls.defect_id").fetchall()
-    upd = []
-    for (lid, rect, dtext) in rows:
-        blob = f"{dtext or ''} {rect or ''}"
-        if NFF_LANG.search(blob):
-            tier = "LOW"
-        elif ROOT_CAUSE.search(blob):
-            tier = "HIGH"
-        else:
-            tier = "MED"
-        upd.append((tier, lid))
-    con.executemany("UPDATE label_silver SET confidence_tier=? WHERE id=?", upd)
-    con.commit()
+    MED: everything else with a citation.
+
+    Walks id ranges rather than loading every label and its narratives into
+    memory at once — at ~1.75M defects the fetchall() form is several GB.
+    """
+    maxid = con.execute("SELECT MAX(id) FROM label_silver").fetchone()[0] or 0
+    for lo in range(0, maxid + 1, chunk):
+        rows = con.execute(
+            "SELECT ls.id, d.rectification_text, d.defect_text "
+            "FROM label_silver ls JOIN defect d ON d.id=ls.defect_id "
+            "WHERE ls.id>=? AND ls.id<?", (lo, lo + chunk)).fetchall()
+        upd = []
+        for (lid, rect, dtext) in rows:
+            blob = f"{dtext or ''} {rect or ''}"
+            if NFF_LANG.search(blob):
+                tier = "LOW"
+            elif ROOT_CAUSE.search(blob):
+                tier = "HIGH"
+            else:
+                tier = "MED"
+            upd.append((tier, lid))
+        if upd:
+            con.executemany(
+                "UPDATE label_silver SET confidence_tier=? WHERE id=?", upd)
+            con.commit()
 
 
 def summary(con: sqlite3.Connection) -> dict:
