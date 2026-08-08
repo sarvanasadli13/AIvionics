@@ -54,6 +54,22 @@ def upsert_manual(con, oem, actype, mtype, doc_std, source, revision):
     return cur.lastrowid
 
 
+def coverage_pct(n_tasks: int, toc_entries: int) -> float | None:
+    """Extraction coverage against a chapter's own TOC, or None when the TOC
+    is not a usable denominator.
+
+    Chapters 26 and 29 yield no TOC entries at all and 27 only 30 against 684
+    real tasks: their contents pages were inside the megabyte missing from the
+    front of every chapter file. Recording 0% there would read as "we do not
+    hold this chapter" and trip the Gate 1 refusal rule on a chapter held in
+    full, and recording 2280% is simply false. Unknown is the honest value,
+    and the UI renders it as "not measured".
+    """
+    if toc_entries <= 0 or n_tasks > toc_entries:
+        return None
+    return round(100 * n_tasks / toc_entries, 1)
+
+
 def chapter_sources() -> list[Path]:
     """One PDF per ATA chapter, preferring a repaired rebuild where one exists.
 
@@ -122,7 +138,7 @@ def run_amm(con) -> None:
                 for r in t.references:
                     con.execute("INSERT INTO task_link VALUES(?,?,?)",
                                 (tid, r, "reference"))
-        pct = round(100 * len(tasks) / mentions, 1) if mentions else 0.0
+        pct = coverage_pct(len(tasks), mentions)
         con.execute("INSERT OR REPLACE INTO coverage VALUES(?,?,?,?,?)",
                     (mid, ch, mentions, len(tasks), pct))
         total += len(tasks)

@@ -164,3 +164,27 @@ def test_writer_emits_a_header_xref_and_trailer(tmp_path):
     doc = fitz.open(str(out))
     assert doc.page_count == 1
     doc.close()
+
+
+# ── coverage denominator (phase1) ────────────────────────────────────────
+def test_coverage_is_unknown_when_the_toc_did_not_survive():
+    """A missing or partial contents page is not a denominator.
+
+    Chapters 26 and 29 yield no TOC entries and 27 only 30 against 684 real
+    tasks, because their contents pages were inside the megabyte missing from
+    the front of every file. Storing 0% would read as "chapter absent" and
+    trip the Gate 1 refusal rule on a chapter held in full; storing 2280%
+    is simply false.
+    """
+    import importlib.util as _u
+    spec = _u.spec_from_file_location("phase1", ROOT / "scripts" / "phase1.py")
+    phase1 = _u.module_from_spec(spec)
+    sys.modules["phase1"] = phase1
+    spec.loader.exec_module(phase1)
+    pct = phase1.coverage_pct
+
+    assert pct(109, 109) == 100.0        # intact TOC
+    assert pct(80, 100) == 80.0          # genuinely partial extraction
+    assert pct(56, 0) is None            # ch26 — no TOC survived
+    assert pct(684, 30) is None          # ch27 — TOC partial, not a denominator
+    assert pct(0, 0) is None             # extraction failed outright
