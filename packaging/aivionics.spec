@@ -41,9 +41,22 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    # Qt ships several large modules this application never touches. Excluding
-    # them is the difference between a ~180 MB and a ~400 MB install.
+    # Two classes of exclusion, both load-bearing.
+    #
+    # 1. Other Qt bindings. PyInstaller refuses to build at all when it sees
+    #    two ("attempt to collect multiple Qt bindings packages"), and PyQt5
+    #    gets pulled in here purely because `qtpy` is installed in the
+    #    development environment. The application imports neither — verified,
+    #    not assumed.
+    # 2. torch and transformers. Nothing in this application imports them:
+    #    embedding is fastembed over onnxruntime and reranking is FlashRank,
+    #    also onnxruntime. PyInstaller's hooks collect torch speculatively
+    #    because transformers happens to be installed, and torch alone is
+    #    roughly 2 GB — it would dominate the installer for a dependency that
+    #    is never loaded (PLAN §4: onnxruntime, not torch).
     excludes=[
+        "PyQt5", "PyQt6", "qtpy", "PySide2",
+        "torch", "torchvision", "torchaudio", "transformers", "tensorboard",
         "tkinter", "matplotlib", "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore", "PySide6.QtCharts",
         "PySide6.QtDataVisualization", "PySide6.QtMultimedia",
