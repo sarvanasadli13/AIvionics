@@ -24,7 +24,10 @@ EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 INDEX_VERSION = "v1-bge-small-en-1.5"
 
-# Avionics-relevant JASC/ATA chapters (per design sessions)
-AVIONICS_CHAPTERS = {"22", "23", "31", "34", "42", "44", "45", "46", "77"}
+# Scope note (owner, 2026-08-08): the tool covers the WHOLE ATA range —
+# mechanical, structural and engine systems as well as avionics. An
+# AVIONICS_CHAPTERS constant lived here and was never referenced; it was
+# removed rather than left as a filter waiting to be applied by mistake.
+# Chapter names live in parsers/ata.py; nothing filters by chapter.
 
 SDR_YEARS = list(range(1995, 2027))
