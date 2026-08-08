@@ -57,6 +57,12 @@ a = Analysis(
     excludes=[
         "PyQt5", "PyQt6", "qtpy", "PySide2",
         "torch", "torchvision", "torchaudio", "transformers", "tensorboard",
+        # 3. Data and cloud libraries reached transitively and never imported:
+        #    pyarrow 79 MB, scipy 58 MB, duckdb 31 MB, babel 31 MB,
+        #    botocore 23 MB. Checked the same way — none appears in
+        #    sys.modules after importing every module this app actually uses.
+        "pyarrow", "duckdb", "botocore", "boto3", "babel", "scipy",
+        "pandas", "PIL", "IPython", "jedi", "notebook", "pytest",
         "tkinter", "matplotlib", "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore", "PySide6.QtCharts",
         "PySide6.QtDataVisualization", "PySide6.QtMultimedia",
