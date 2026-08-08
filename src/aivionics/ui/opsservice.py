@@ -202,33 +202,37 @@ class OpsService:
                           compliance_rows=tuple(rows), total_defects=int(total))
 
     # ── threading ─────────────────────────────────────────────────────
-    def submit(self, fn: Callable[[], object]) -> "OpsSignals":
+    def submit(self, fn: Callable[[], object]) -> object:
         """Run `fn` on the global pool and return the signals it will emit."""
-        signals = OpsSignals()
+        signals = signals_type()()
         net.submit(fn, signals)
         return signals
 
 
-def _signals_type():
-    from PySide6.QtCore import QObject, Signal
-
-    class OpsSignals(QObject):
-        done = Signal(object)
-        failed = Signal(str)
-
-    return OpsSignals
+_SIGNALS = None
 
 
-def __getattr__(name: str):
-    """Build the Qt type on first use, so this module imports without Qt."""
-    if name == "OpsSignals":
-        globals()["OpsSignals"] = _signals_type()
-        return globals()["OpsSignals"]
-    raise AttributeError(name)
+def signals_type():
+    """Build the Qt signal type on first use, not at import.
+
+    A module-level `__getattr__` would not do: it is consulted for attribute
+    access on the module object, not for a global name inside a function, so
+    `OpsSignals()` in `submit` would raise NameError.
+    """
+    global _SIGNALS
+    if _SIGNALS is None:
+        from PySide6.QtCore import QObject, Signal
+
+        class OpsSignals(QObject):
+            done = Signal(object)
+            failed = Signal(str)
+
+        _SIGNALS = OpsSignals
+    return _SIGNALS
 
 
 __all__ = ["AirportDetail", "OpsService", "Ready", "TailRecord",
-           "utc_now"]
+           "signals_type", "utc_now"]
 
 
 def utc_now() -> datetime:

@@ -585,7 +585,12 @@ def project(latitude: float, longitude: float, width: float, height: float,
     canvas instead of painting a marker outside it.
     """
     lat = max(MIN_LAT, min(MAX_LAT, float(latitude)))
-    lon = ((float(longitude) + 180.0) % 360.0) - 180.0
+    lon = float(longitude)
+    if lon > 180.0 or lon < -180.0:
+        # Wrap only what is out of range. An unconditional modulo sends
+        # exactly 180°E to -180 and puts an aircraft on the antimeridian at
+        # the far *left* edge of the map.
+        lon = ((lon + 180.0) % 360.0) - 180.0
     x = (lon + 180.0) / 360.0 * float(width)
     y = (MAX_LAT - lat) / (MAX_LAT - MIN_LAT) * float(height)
     return x, y

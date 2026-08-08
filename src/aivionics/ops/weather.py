@@ -277,6 +277,22 @@ def _number(token: str) -> float | None:
     return -float(digits) if negative else float(digits)
 
 
+# Vostok recorded -89.2 °C and Furnace Creek 56.7 °C; anything outside this
+# band is a group that matched the shape of a temperature and is not one.
+TEMP_MIN_C, TEMP_MAX_C = -90.0, 60.0
+
+
+def _plausible_temperature(temperature: float | None,
+                           dewpoint: float | None) -> bool:
+    if temperature is None or not TEMP_MIN_C <= temperature <= TEMP_MAX_C:
+        return False
+    if dewpoint is None:
+        return True
+    # Both are rounded to whole degrees, so dewpoint above temperature is a
+    # misparse rather than an observation. One degree of slack for rounding.
+    return TEMP_MIN_C <= dewpoint <= temperature + 1.0
+
+
 def _describe_weather(token: str) -> str | None:
     match = _WX.match(token)
     if not match:
@@ -384,8 +400,15 @@ def decode_metar(raw: str, now: datetime | None = None) -> Metar:
             clouds.append(CloudLayer(cover=token, base_ft=None))
             continue
         if match := _TEMPS.match(token):
-            temperature = _number(match.group(1))
-            dewpoint = _number(match.group(2)) if match.group(2) else None
+            reading = _number(match.group(1))
+            damp = _number(match.group(2)) if match.group(2) else None
+            if _plausible_temperature(reading, damp):
+                temperature, dewpoint = reading, damp
+            else:
+                # `99/99` matches the shape of a temperature group and is not
+                # one. A decoder that will print any number the regex accepts
+                # is worse than one that admits it did not understand.
+                undecoded.append(token)
             continue
         if match := _QNH.match(token):
             kind, value = match.groups()

@@ -112,7 +112,7 @@ class StateVector:
 
     def speed_text(self) -> str:
         speed = self.speed_kt
-        return "speed not reported" if speed is None else f"{speed} kt ground speed"
+        return "not reported" if speed is None else f"{speed} kt"
 
     def heading_text(self) -> str:
         if self.true_track is None:

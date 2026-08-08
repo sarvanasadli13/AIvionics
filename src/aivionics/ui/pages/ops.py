@@ -192,9 +192,16 @@ class MapView(QWidget):
             painter.drawRect(int(x), int(y), 2, 2)
 
     def _markers_paint(self, painter, pal) -> None:
-        font = ui_font(8, QFont.Weight.DemiBold)
-        painter.setFont(font)
-        for position, x, y in self._markers():
+        painter.setFont(ui_font(8, QFont.Weight.DemiBold))
+        metrics = painter.fontMetrics()
+        placed = self._markers()
+        # Selected first, so that when two tails overlap — a whole fleet in
+        # the same European sector is the normal case, not an edge case — the
+        # one being read is the one that keeps its label.
+        placed.sort(key=lambda item: item[0].tail != self.selected)
+        labelled: list[tuple[float, float, float, float]] = []
+
+        for position, x, y in placed:
             state = position.state
             chosen = position.tail == self.selected
             colour = pal["cy"] if chosen else pal["cyf"]
@@ -206,8 +213,16 @@ class MapView(QWidget):
                                  state.true_track or 0.0)
             if not marker.isNull():
                 painter.drawPixmap(int(x - MARKER_PX), int(y - MARKER_PX), marker)
+
+            left, top = x + 13, y - 6
+            right = left + metrics.horizontalAdvance(position.tail)
+            bottom = top + metrics.height()
+            if any(left < ox2 and right > ox1 and top < oy2 and bottom > oy1
+                   for ox1, oy1, ox2, oy2 in labelled):
+                continue        # would overprint a label already drawn
+            labelled.append((left, top, right, bottom))
             painter.setPen(QColor(pal["txt"] if chosen else pal["txt2"]))
-            painter.drawText(int(x + 13), int(y + 4), position.tail)
+            painter.drawText(int(left), int(y + 4), position.tail)
 
 
 class _Card(QFrame):
@@ -228,8 +243,14 @@ class _Card(QFrame):
     def clear_body(self) -> None:
         while self.box.count() > 1:
             item = self.box.takeAt(1)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # Unparent before scheduling deletion: `deleteLater` alone
+                # leaves the old widget painted until the event loop gets
+                # round to it, which put the placeholder caption on top of
+                # the card that had just replaced it.
+                widget.setParent(None)
+                widget.deleteLater()
 
 
 def _pair(label: str, value: str, mono: bool = False) -> QWidget:
@@ -562,16 +583,38 @@ class OpsPage(Page):
         self.detail = detail
         while self.airport_box.count():
             item = self.airport_box.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
 
-        self.airport_box.addWidget(self._identity(detail))
-        self.airport_box.addWidget(self._runways(detail))
-        self.airport_box.addWidget(self._frequencies(detail))
+        # Two columns, and the split is the point: everything on the left is
+        # bundled data that renders with the cable out, everything on the
+        # right needs the network. Stacked in one column the weather panel
+        # sat below a fifteen-row frequency table and off the screen.
+        columns = QWidget()
+        row = QHBoxLayout(columns)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(11)
+
+        offline = QVBoxLayout()
+        offline.setSpacing(9)
+        offline.addWidget(self._identity(detail))
+        offline.addWidget(self._runways(detail))
+        offline.addWidget(self._frequencies(detail))
+        offline.addStretch(1)
+        row.addLayout(offline, 1)
+
+        online = QVBoxLayout()
+        online.setSpacing(9)
         self.metar_card = _Card("Weather — METAR and TAF")
-        self.airport_box.addWidget(self.metar_card)
+        online.addWidget(self.metar_card)
         self.movements_card = _Card("Movements — arrivals and departures")
-        self.airport_box.addWidget(self.movements_card)
+        online.addWidget(self.movements_card)
+        online.addStretch(1)
+        row.addLayout(online, 1)
+
+        self.airport_box.addWidget(columns)
         self.airport_box.addStretch(1)
 
         if bool(getattr(self.ctx, "online_enabled", False)):
@@ -738,8 +781,8 @@ class OpsPage(Page):
             if not panel.ok:
                 card.add(caption(panel.fetch.error, "Muted", 8.5))
                 continue
-            card.add(caption(f"{len(panel.flights)} in {panel.window_text()}",
-                             "Faint", 8))
+            card.add(caption(f"{len(panel.flights)} recorded · window "
+                             f"{panel.window_text()}", "Faint", 8))
             for flight in panel.flights[:8]:
                 other = flight.other_end(panel.airport)
                 mark = " (airport inferred, several candidates)" \

@@ -442,7 +442,7 @@ ACTIVITY = FetchLog()
 # Imported lazily: `aivionics.ops.net` must stay usable in a test process
 # with no Qt application, and the compliance/importer paths never need Qt.
 
-def submit(fn: Callable[[], Any], signals: "FetchSignals") -> None:
+def submit(fn: Callable[[], Any], signals: Any) -> None:
     """Run `fn` on the global thread pool and emit its result.
 
     Every online call in this package goes through here. A blocking network
@@ -450,34 +450,44 @@ def submit(fn: Callable[[], Any], signals: "FetchSignals") -> None:
     outright.
     """
     from PySide6.QtCore import QThreadPool
-    QThreadPool.globalInstance().start(_Job(fn, signals))
+    _signals, job = _qt_types()
+    QThreadPool.globalInstance().start(job(fn, signals))
 
 
-def _make_signal_types():
-    from PySide6.QtCore import QObject, QRunnable, Signal
-
-    class FetchSignals(QObject):
-        done = Signal(object)          # the Fetch, or whatever fn returned
-        failed = Signal(str)           # message
-
-    class Job(QRunnable):
-        def __init__(self, fn, signals):
-            super().__init__()
-            self.fn, self.signals = fn, signals
-
-        def run(self) -> None:                              # pragma: no cover
-            try:
-                self.signals.done.emit(self.fn())
-            except Exception as exc:                        # noqa: BLE001
-                self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
-
-    return FetchSignals, Job
+_QT_TYPES = None
 
 
-def __getattr__(name: str):
-    """Build the Qt-dependent types on first use, not at import."""
-    if name in ("FetchSignals", "_Job"):
-        signals, job = _make_signal_types()
-        globals()["FetchSignals"], globals()["_Job"] = signals, job
-        return globals()[name]
-    raise AttributeError(name)
+def _qt_types():
+    """Build the Qt-dependent types on first use, not at import.
+
+    Deliberately a function and not a module-level `__getattr__`: that hook
+    is consulted for attribute access on the *module object*, never for a
+    global name looked up inside a function, so `_Job(...)` in `submit`
+    raised NameError instead of building the class.
+    """
+    global _QT_TYPES
+    if _QT_TYPES is None:
+        from PySide6.QtCore import QObject, QRunnable, Signal
+
+        class FetchSignals(QObject):
+            done = Signal(object)      # the Fetch, or whatever fn returned
+            failed = Signal(str)       # message
+
+        class Job(QRunnable):
+            def __init__(self, fn, signals):
+                super().__init__()
+                self.fn, self.signals = fn, signals
+
+            def run(self) -> None:                          # pragma: no cover
+                try:
+                    self.signals.done.emit(self.fn())
+                except Exception as exc:                    # noqa: BLE001
+                    self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+
+        _QT_TYPES = (FetchSignals, Job)
+    return _QT_TYPES
+
+
+def fetch_signals():
+    """The `QObject` carrying `done(object)` / `failed(str)` for `submit`."""
+    return _qt_types()[0]
