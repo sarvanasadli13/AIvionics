@@ -95,3 +95,34 @@ def test_case_row_survives_missing_text(tmp_path):
 def test_case_rows_empty_input_hits_no_database(tmp_path):
     con = db.connect(tmp_path / "t.db")
     assert case_rows(con, []) == {}
+
+
+# ── applicability wording (standing rule 8) ──────────────────────────────
+def test_no_machine_token_reaches_the_applicability_label():
+    """Fail-closed states must read as instructions, not as engine tokens.
+
+    `not_checked` on screen tells an engineer nothing about whether the task
+    applies to the aircraft in front of them.
+    """
+    from aivionics.retrieval.search import Effectivity, resolve_applicability
+    from aivionics.ui.pages.diagnose import APPLICABILITY_TEXT
+
+    tail = Effectivity(tail="N123AB")
+    produced = {
+        resolve_applicability({}, None, {}),                          # not_checked
+        resolve_applicability(
+            {"applic_refs": "", "effectivity_raw": "TBC ALL"}, tail, {}),
+        resolve_applicability(
+            {"applic_refs": "", "effectivity_raw": "AIRPLANES 1-40"}, tail, {}),
+        resolve_applicability(
+            {"applic_refs": "AP1", "effectivity_raw": ""}, tail,
+            {"AP1": {"tail": "N123AB"}}),                             # applicable
+        resolve_applicability(
+            {"applic_refs": "AP1", "effectivity_raw": ""}, tail,
+            {"AP1": {"tail": "N999ZZ"}}),                             # not_applicable
+    }
+
+    for token in produced:
+        assert token in APPLICABILITY_TEXT, f"unmapped applicability: {token}"
+    for text in APPLICABILITY_TEXT.values():
+        assert "_" not in text

@@ -41,6 +41,16 @@ CHANNEL_TEXT = {
     "dense": "semantic match",
 }
 
+# Standing rule 8 is "fail closed on effectivity": anything not positively
+# resolved must say so in words an engineer can act on. The engine's tokens are
+# machine values and must never reach the screen as they are.
+APPLICABILITY_TEXT = {
+    "applicable": "effectivity: applicable",
+    "not_applicable": "effectivity: NOT applicable to this tail",
+    "unresolved": "applicability unresolved — verify in controlled data",
+    "not_checked": "effectivity not checked — no tail selected",
+}
+
 
 class LocatorRow(QFrame):
     """One ranked task locator. Selectable, never expandable into a body."""
@@ -91,8 +101,8 @@ class LocatorRow(QFrame):
         if prov.get("catalogue_only"):
             tags.addWidget(Tag("locator only — no body held", theme))
         applic = prov.get("applicability")
-        if applic and applic != "resolved":
-            tags.addWidget(Tag(str(applic), theme))
+        if applic and applic != "applicable":
+            tags.addWidget(Tag(APPLICABILITY_TEXT.get(applic, str(applic)), theme))
         if prov.get("jasc_boost"):
             tags.addWidget(Tag("ATA hint boosted", theme))
         tags.addStretch(1)
