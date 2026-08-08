@@ -44,6 +44,11 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--fake", action="store_true",
                     help="hashed offline embedder — must match how the index was built")
+    ap.add_argument("--aircraft-like",
+                    help="restrict to airframes whose model matches this SQL "
+                         "LIKE pattern, e.g. '%737%'. ATA task numbers are not "
+                         "unique across manufacturers, so an unrestricted "
+                         "answerable pool counts cross-type number collisions")
     ap.add_argument("--answerable-only", action="store_true",
                     help="keep only pairs whose labelled task is in the corpus. "
                          "Measures the engine rather than the size of the "
@@ -68,7 +73,8 @@ def main() -> int:
 
     queries = evalharness.load_eval_queries(
         con, split=args.split, limit=args.limit,
-        answerable_only=args.answerable_only)
+        answerable_only=args.answerable_only,
+        aircraft_like=args.aircraft_like)
     if not queries:
         print(f"no leak-free labelled queries in split '{args.split}' — "
               f"Phase 0 must finish first")
@@ -83,6 +89,7 @@ def main() -> int:
     report["elapsed_s"] = round(time.time() - start, 1)
     report["reranker"] = args.rerank
     report["answerable_only"] = bool(args.answerable_only)
+    report["aircraft_like"] = args.aircraft_like
 
     print()
     print(evalharness.format_table(report))

@@ -84,6 +84,7 @@ def load_eval_queries(
     leak_free: bool = True,
     limit: int | None = None,
     answerable_only: bool = False,
+    aircraft_like: str | None = None,
 ) -> list[EvalQuery]:
     """Load the evaluation pairs.
 
@@ -93,13 +94,25 @@ def load_eval_queries(
     pairs — too few to decide anything. Filtering measures the engine on the
     population where it can succeed; the coverage fraction is reported
     separately and remains the headline limitation.
+
+    ``aircraft_like`` restricts to airframes whose model matches a SQL LIKE
+    pattern, and it is not cosmetic. ATA task numbers are not unique across
+    manufacturers: an A320 narrative can cite `28-21-00-810-815` while a task
+    with that exact number exists in the 737 corpus as a different procedure
+    on a different aircraft. Such a pair looks answerable and is not, so the
+    clean engine measurement restricts to the type whose manuals are held.
     """
     sql = [
         "SELECT d.id, d.defect_text, d.ata_ref, ls.task_number",
         "FROM label_silver ls JOIN defect d ON d.id = ls.defect_id",
-        "WHERE TRIM(COALESCE(d.defect_text, '')) <> ''",
     ]
     params: list = []
+    if aircraft_like:
+        sql.append("JOIN sdr_raw s ON s.id = d.sdr_id")
+    sql.append("WHERE TRIM(COALESCE(d.defect_text, '')) <> ''")
+    if aircraft_like:
+        sql.append("AND UPPER(COALESCE(s.aircraft_model,'')) LIKE ?")
+        params.append(aircraft_like.upper())
     if leak_free:
         sql.append("AND ls.leak_free = 1")
     if split:
