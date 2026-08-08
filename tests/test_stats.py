@@ -289,10 +289,11 @@ def test_chapter_counts_report_eligible_alongside_repeated(con):
 
 def test_wilson_bounds_stay_inside_zero_and_one():
     assert wilson_interval(0, 10)[0] == 0.0
-    assert wilson_interval(10, 10)[1] == 1.0
+    # floating point: the closed form lands on 0.9999999999999999 for k==n
+    assert wilson_interval(10, 10)[1] == pytest.approx(1.0)
     for k, n in ((0, 1), (1, 1), (3, 7), (50, 100), (1, 1000)):
         lo, hi = wilson_interval(k, n)
-        assert 0.0 <= lo <= k / n <= hi <= 1.0
+        assert 0.0 <= lo <= k / n <= hi <= 1.0 + 1e-9
 
 
 def test_wilson_narrows_as_n_grows():

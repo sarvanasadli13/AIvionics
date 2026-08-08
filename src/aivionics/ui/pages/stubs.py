@@ -86,33 +86,6 @@ class _TablePage(Page):
         return wrap
 
 
-class FleetPage(_TablePage):
-    title = "Fleet register"
-    header_right = "per-tail configuration record"
-    columns = ["Tail", "Type", "MSN", "Line no.", "Year built",
-               "Total time (h)", "Cycles"]
-    empty_head = "No aircraft registered"
-    empty_body = ("Tails are added in Admin or imported with the fleet CSV. "
-                  "Line number and year of manufacture are held because pooling "
-                  "airframes built to different standards can make a fleet "
-                  "statistic directionally wrong.")
-
-
-class ReliabilityPage(_TablePage):
-    title = "Reliability"
-    header_right = "aggregate only · n always shown"
-    columns = ["ATA", "Symptom class", "Removals", "Repeat ≤30 d",
-               "Rate", "n", "95% CI"]
-    provenance = ("Source: SDR-mined proxy · no operator tech log or shop findings "
-                  "imported. Every figure on this page is computed from a "
-                  "reportable-occurrence sample — directional evidence, not a "
-                  "measured rate.")
-    empty_head = "No statistics yet"
-    empty_body = ("The repeat-defect metric is 'removals on this part number "
-                  "followed by a repeat of the same defect within 30 days' — it "
-                  "is not an NFF rate, because NFF is a shop finding and is not "
-                  "in this data. Groups below the small-n threshold stay "
-                  "suppressed rather than being shown with a wide interval.")
 
 
 class CompliancePage(_TablePage):
