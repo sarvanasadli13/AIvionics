@@ -273,6 +273,7 @@ class NetClient:
     backoff: float = DEFAULT_BACKOFF
     transport: Callable[[str, float], tuple[int, str]] = _urllib_transport
     sleep: Callable[[float], None] = time.sleep
+    log: "FetchLog" = field(default_factory=lambda: ACTIVITY)
 
     def get(self, url: str, source: str, ttl: float = 120.0) -> Fetch:
         """Fetch `url`, or say precisely why not. Never raises for I/O.
@@ -280,13 +281,20 @@ class NetClient:
         Order matters and is not negotiable: the master switch is checked
         before the allow-list, and both before the cache, so a switched-off
         application does no work at all on behalf of an online feature.
+
+        Only outcomes that involved the host reach `log`. A cache hit did not
+        contact anyone, and counting it would turn Admin's "what did this
+        machine talk to" into a screen that overstates the answer.
         """
         if not self.online():
             return Fetch(source=source, url=url, error=OFFLINE_REASON)
         try:
             check_url(url)
         except HostNotAllowed as exc:
-            return Fetch(source=source, url=url, error=str(exc))
+            # A refused host is the single most important row Admin can show.
+            refused = Fetch(source=source, url=url, error=str(exc))
+            self.log.record(refused)
+            return refused
 
         cached = self.cache.get(url, ttl)
         if cached is not None:
@@ -311,8 +319,11 @@ class NetClient:
         if body is not None:
             now = datetime.now(timezone.utc)
             self.cache.put(url, body, source, now)
-            return Fetch(source=source, data=body, fetched_at=now, url=url)
+            fetched = Fetch(source=source, data=body, fetched_at=now, url=url)
+            self.log.record(fetched)
+            return fetched
 
+        self.log.record(Fetch(source=source, url=url, error=error))
         entry = self.cache.peek(url)
         if entry is not None:
             cached_body, fetched_at = entry
@@ -364,6 +375,67 @@ class NetClient:
 
 def default_client(online: Callable[[], bool]) -> NetClient:
     return NetClient(online=online)
+
+
+# ── what this machine actually talked to ────────────────────────────────
+# `ALLOWED_HOSTS` says what *may* be contacted; Admin also has to answer
+# "and did it?". The log is in memory and per session on purpose: it is an
+# operator's view of the running application, not a second audit trail
+# competing with the hash-chained one in `aivionics.audit`.
+
+@dataclass
+class SourceActivity:
+    """One outbound source, as Admin renders it."""
+
+    source: str
+    host: str = ""
+    attempts: int = 0
+    failures: int = 0
+    last_attempt: datetime | None = None
+    last_success: datetime | None = None
+    last_error: str = ""
+
+    def line(self) -> str:
+        if self.last_success is not None:
+            stamp = self.last_success.strftime("%H:%M:%SZ")
+            tail = f" · {self.failures} failed" if self.failures else ""
+            return f"last succeeded {stamp} · {self.attempts} calls{tail}"
+        if self.attempts:
+            return (f"{self.attempts} attempt{'s' if self.attempts > 1 else ''}, "
+                    f"none succeeded — {self.last_error or 'no reason recorded'}")
+        return "not contacted this session"
+
+
+class FetchLog:
+    """Per-source counters and timestamps for the current session."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, SourceActivity] = {}
+
+    def record(self, fetch: "Fetch") -> None:
+        row = self._rows.setdefault(fetch.source, SourceActivity(fetch.source))
+        row.host = host_of(fetch.url) or row.host
+        row.attempts += 1
+        row.last_attempt = datetime.now(timezone.utc)
+        if fetch.ok:
+            row.last_success = fetch.fetched_at or row.last_attempt
+            row.last_error = ""
+        else:
+            row.failures += 1
+            row.last_error = fetch.error
+        self._rows[fetch.source] = row
+
+    def rows(self) -> list[SourceActivity]:
+        return sorted(self._rows.values(), key=lambda row: row.source)
+
+    def get(self, source: str) -> SourceActivity | None:
+        return self._rows.get(source)
+
+    def clear(self) -> None:
+        self._rows.clear()
+
+
+ACTIVITY = FetchLog()
 
 
 # ── off the UI thread ───────────────────────────────────────────────────

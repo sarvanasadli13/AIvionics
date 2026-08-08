@@ -548,10 +548,21 @@ class Rail(QWidget):
             self.refresh_theme(getattr(self, "_theme", T.DEFAULT_THEME))
 
     def set_online_enabled(self, enabled: bool) -> None:
+        """Grey the Ops item when the switch is off — but leave it reachable.
+
+        PLAN §4A.1 rule 4 says this item greys out; PLAN 4B.5 says the airport
+        page's offline fields — identifiers, runways, elevation, IANA local
+        time — render always. Disabling the button would satisfy the first by
+        making the second unreachable, so the item is dimmed and captioned
+        rather than switched off. Only the online panels inside go dark.
+        """
+        self._online = enabled
         ops = self.buttons["ops"]
-        ops.setEnabled(enabled)
-        ops.setToolTip("Ops" if enabled
-                       else "Ops — online features are switched off in Admin")
+        ops.setToolTip(
+            "Ops — live map, airport page, weather" if enabled else
+            "Ops — online features are switched off in Admin; airport data, "
+            "runways and local time still work offline")
+        self.refresh_theme(getattr(self, "_theme", T.DEFAULT_THEME))
 
     def refresh_theme(self, theme: str) -> None:
         self._theme = theme
@@ -559,6 +570,8 @@ class Rail(QWidget):
         for key, b in self.buttons.items():
             active = key == self._current
             colour = pal["cy"] if active else pal["txt3"]
+            if key == "ops" and not getattr(self, "_online", False) and not active:
+                colour = pal["hair"]        # dimmed, still clickable
             b.setIcon(qta.icon(b.property("glyph"), color=colour,
                                color_disabled=pal["txt3"]))
         self.update()

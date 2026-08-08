@@ -1,4 +1,4 @@
-"""Fleet, Reliability, Compliance, Ops and Admin.
+"""Admin.
 
 Structured placeholders: the headers, the provenance pattern and the
 honest-limitation copy are real, the data wiring is not. Getting the frame
@@ -8,15 +8,19 @@ without them is how a shadow compliance clock gets shipped.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel,
-                               QHeaderView, QTableWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFrame,
+                               QHBoxLayout, QHeaderView, QLabel, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
+from .. import store
 from .. import theme as T
-from ..widgets import (EmptyState, ProvenanceLine, SectionHeader, StatusBadge,
-                       ui_font)
-from .base import Page, caption
+from ..widgets import (EmptyState, Placard, ProvenanceLine, SectionHeader,
+                       StatusBadge, ui_font)
+from .base import Page, caption, scroll_host
+
+from ...ops import net
 
 
 class _TablePage(Page):
@@ -89,44 +93,104 @@ class _TablePage(Page):
 
 
 
-class OpsPage(Page):
-    """The entire online-dependent surface: map, airport page, weather.
+class OnlineSection(QWidget):
+    """The outbound picture, in the terms IT will ask about (standing rule 12).
 
-    One rail item, so switching `online_enabled` off removes exactly one
-    thing from the navigation and the offline core is provably untouched
-    (standing rule 12).
+    Three questions, answered on one card: may this machine call out at all,
+    which hosts is it permitted to reach, and which of them has it actually
+    reached this session. The host table is `net.HOST_REGISTRY` rendered
+    verbatim — adding a row there is a code change, not a setting, and this
+    screen is deliberately incapable of adding one.
     """
 
-    title = "Ops"
+    toggled = Signal(bool)
 
-    def __init__(self, ctx, parent=None):
-        super().__init__(ctx, parent)
+    def __init__(self, enabled: bool, theme: str = T.DEFAULT_THEME, parent=None):
+        super().__init__(parent)
+        self.theme_name = theme
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(SectionHeader("Ops", "live fleet map · airport page · weather"))
+        lay.setSpacing(9)
 
-        self.offline_state = EmptyState(
-            "mdi6.wifi-off",
-            "Online features are switched off",
-            "Live ADS-B positions, METAR/TAF and arrivals/departures sit behind "
-            "the `online_enabled` setting in Admin, with their own network layer "
-            "and their own allow-listed hosts. The manuals core, retrieval and "
-            "statistics run identically with the network unplugged.",
-            theme=self.theme_name)
-        lay.addWidget(self.offline_state, 1)
+        card = QFrame()
+        card.setObjectName("Card")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(13, 10, 13, 11)
+        box.setSpacing(8)
 
-        self.hosts = ProvenanceLine(
-            "Outbound hosts when enabled: aviationweather.gov · opensky-network.org. "
-            "Airport, runway and navaid data is bundled offline and never calls out.")
-        self.hosts.setContentsMargins(15, 8, 15, 12)
-        lay.addWidget(self.hosts)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        title = QLabel("Online features")
+        title.setFont(ui_font(10, QFont.Weight.DemiBold))
+        head.addWidget(title)
+        head.addStretch(1)
+        self.switch = QCheckBox("Allow outbound connections")
+        self.switch.setChecked(enabled)
+        self.switch.toggled.connect(self.toggled.emit)
+        head.addWidget(self.switch)
+        box.addLayout(head)
 
-    def on_shown(self) -> None:
-        enabled = bool(self.ctx and self.ctx.online_enabled)
-        self.offline_state.headline.setText(
-            "Online features are enabled — modules not built yet" if enabled
-            else "Online features are switched off")
+        box.addWidget(caption(
+            "Off by default. With this off the application opens no socket at "
+            "all: the manuals core, retrieval, the case base and the statistics "
+            "run identically with the network cable out, and the Ops screen "
+            "still serves bundled airport data, runways and local time.",
+            "Muted", 8.5))
+
+        box.addWidget(Placard("Allow-listed hosts"))
+        hosts = QTableWidget(len(net.HOST_REGISTRY), 3)
+        hosts.setHorizontalHeaderLabels(["Host", "What it is used for", "Terms"])
+        hosts.verticalHeader().setVisible(False)
+        hosts.verticalHeader().setDefaultSectionSize(T.ROW_HEIGHT + 8)
+        hosts.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        hosts.setShowGrid(False)
+        hosts.setWordWrap(True)
+        header = hosts.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft
+                                   | Qt.AlignmentFlag.AlignVCenter)
+        for i in range(3):
+            header.setSectionResizeMode(
+                i, QHeaderView.ResizeMode.ResizeToContents if i == 0
+                else QHeaderView.ResizeMode.Stretch)
+        for i, host in enumerate(net.HOST_REGISTRY):
+            for c, value in enumerate((host.host, host.purpose, host.terms)):
+                hosts.setItem(i, c, QTableWidgetItem(value))
+        hosts.setFixedHeight(header.sizeHint().height()
+                             + len(net.HOST_REGISTRY) * (T.ROW_HEIGHT + 8) + 4)
+        box.addWidget(hosts)
+        box.addWidget(caption(
+            "A host outside this list is refused before a socket is opened, "
+            "and the match is on whole labels — opensky-network.org.example.com "
+            "is rejected, not accepted as a substring.", "Faint", 8))
+
+        box.addWidget(Placard("Contacted this session"))
+        self.activity = QVBoxLayout()
+        self.activity.setSpacing(3)
+        box.addLayout(self.activity)
+
+        box.addWidget(Placard("Bundled offline sources — never call out"))
+        for line in net.OFFLINE_SOURCES:
+            box.addWidget(caption("· " + line, "Faint", 8))
+
+        lay.addWidget(card)
+        self.refresh_activity()
+
+    def refresh_activity(self) -> None:
+        """Per-source last fetch. In memory and per session, as it says."""
+        while self.activity.count():
+            item = self.activity.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        rows = net.ACTIVITY.rows()
+        if not rows:
+            self.activity.addWidget(caption(
+                "No outbound request has been made this session.",
+                "Muted", 8.5))
+            return
+        for row in rows:
+            self.activity.addWidget(caption(
+                f"{row.source} ({row.host or 'host not recorded'}) — {row.line()}",
+                "Muted", 8.5))
 
 
 class AdminPage(Page):
@@ -146,9 +210,6 @@ class AdminPage(Page):
          "Extracted tasks versus each chapter's own table of contents."),
         ("Audit viewer", "mdi6.shield-key-outline",
          "Hash-chained log. The chain is verified on startup."),
-        ("Online features", "mdi6.web",
-         "Master switch plus the allow-listed outbound hosts, so IT can audit "
-         "exactly what this machine talks to."),
     ]
 
     def __init__(self, ctx, parent=None):
@@ -162,10 +223,14 @@ class AdminPage(Page):
         bl = QVBoxLayout(body)
         bl.setContentsMargins(15, 13, 15, 13)
         bl.setSpacing(9)
+        self.online = OnlineSection(
+            bool(getattr(ctx, "online_enabled", False)), self.theme_name)
+        self.online.toggled.connect(self._set_online)
+        bl.addWidget(self.online)
         for name, icon, detail in self.SECTIONS:
             bl.addWidget(self._section(name, icon, detail))
         bl.addStretch(1)
-        lay.addWidget(body, 1)
+        lay.addWidget(scroll_host(body), 1)
 
         self.chain_state = ProvenanceLine("Audit chain: not verified this session.")
         self.chain_state.setContentsMargins(15, 6, 15, 12)
@@ -194,7 +259,23 @@ class AdminPage(Page):
                       0, Qt.AlignmentFlag.AlignTop)
         return card
 
+    def _set_online(self, enabled: bool) -> None:
+        """Flip the master switch and let the shell repaint the rail and badge.
+
+        The setting is the only thing written here. Nothing is fetched as a
+        side effect of switching on — the Ops screen decides when to call out.
+        """
+        con = getattr(self.ctx, "con", None)
+        if con is None:
+            return
+        store.set_setting(con, "online_enabled", "1" if enabled else "0")
+        self.ctx.online_enabled = enabled
+        window = getattr(self.ctx, "window", None)
+        if window is not None:
+            window.apply_context()
+
     def on_shown(self) -> None:
+        self.online.refresh_activity()
         if self.ctx and self.ctx.chain_ok is not None:
             ok, rows = self.ctx.chain_ok, self.ctx.chain_rows
             self.chain_state.setText(
