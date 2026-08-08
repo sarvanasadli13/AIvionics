@@ -254,6 +254,25 @@ QTreeWidget::item:hover, QTreeView::item:hover { background: $s2; }
 QTreeWidget::item:selected, QTreeView::item:selected { background: $cyq; color: $cy; }
 QTableCornerButton::section { background: $s2; border: none; }
 
+/* ── tabs ─────────────────────────────────────────────────────────────
+   Unstyled QTabBar draws grey-on-grey against these surfaces and the
+   unselected tabs effectively disappear. Selection is carried by an accent
+   underline and a weight change, so it survives in both themes and does not
+   depend on colour alone. */
+QTabWidget::pane { border: none; border-top: 1px solid $hair; background: $s1; }
+QTabBar { background: transparent; qproperty-drawBase: 0; }
+QTabBar::tab {
+    background: transparent; color: $txt2; border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 15px; margin-right: 2px;
+    font-size: 10px; font-weight: 600;
+}
+QTabBar::tab:hover { color: $txt; background: $s2; }
+QTabBar::tab:selected {
+    color: $cy; border-bottom: 2px solid $cyf; background: transparent;
+}
+QTabBar::tab:focus { outline: none; }
+
 /* ── scrollbars ───────────────────────────────────────────────────── */
 QScrollBar:vertical { background: transparent; width: 11px; margin: 0; }
 QScrollBar::handle:vertical {

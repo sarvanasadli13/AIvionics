@@ -174,16 +174,29 @@ class FleetPage(Page):
                 self.table.setItem(i, c, item)
         self._filtered = rows
 
+    def _clear_detail(self) -> None:
+        """Empty the configuration panel.
+
+        `setParent(None)` rather than `deleteLater()`: deletion is deferred to
+        the next event-loop pass, and a widget already removed from its layout
+        but not yet destroyed keeps painting at its last geometry — which showed
+        up as the placeholder text bleeding past the panel edge behind a
+        selected tail.
+        """
+        while self.detail_lay.count():
+            item = self.detail_lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self.detail_hint = None
+
     def _show_detail(self, row: int) -> None:
         rows = getattr(self, "_filtered", [])
         if not (0 <= row < len(rows)):
             return
         tail = rows[row].get("tail")
         self.detail_header.set_right(tail or "—")
-        while self.detail_lay.count():
-            item = self.detail_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._clear_detail()
 
         records = self.service.config_records(tail)
         if not records:
