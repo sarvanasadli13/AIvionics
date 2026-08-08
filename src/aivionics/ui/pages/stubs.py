@@ -88,22 +88,6 @@ class _TablePage(Page):
 
 
 
-class CompliancePage(_TablePage):
-    title = "Compliance register"
-    header_right = "checkups · MEL · AD/SB"
-    columns = ["Tail", "Kind", "Reference", "Description", "Due",
-               "Status", "Source system", "Imported"]
-    provenance = ("No CAMO export has been imported. Source system: none · "
-                  "import timestamp: none · freshness: unknown.")
-    banner = ("warn",
-              "The CAMO remains the legal record. This register tracks an "
-              "imported mirror; if the last import is older than its freshness "
-              "window the whole module degrades and alerts are greyed out.")
-    empty_head = "No compliance data imported"
-    empty_body = ("Import a CAMO export (CSV or Excel) from Admin. Every row "
-                  "carries its source system and import time, and no alert "
-                  "renders without that provenance line visible.")
-
 
 class OpsPage(Page):
     """The entire online-dependent surface: map, airport page, weather.
