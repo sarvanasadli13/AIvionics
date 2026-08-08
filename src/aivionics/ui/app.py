@@ -31,6 +31,7 @@ class AppContext:
 
     con: sqlite3.Connection
     corpus: store.CorpusReader
+    db_path: Path = field(default_factory=lambda: config.DB_PATH)
     theme_name: str = T.DEFAULT_THEME
     user: auth.User | None = None
     online_enabled: bool = False
@@ -295,6 +296,7 @@ def build_context(db_path: Path | None = None) -> AppContext:
     return AppContext(
         con=con,
         corpus=corpus,
+        db_path=corpus_path,
         theme_name=store.get_setting(con, "theme", T.DEFAULT_THEME),
         online_enabled=store.online_enabled(con),
         chain_ok=ok,

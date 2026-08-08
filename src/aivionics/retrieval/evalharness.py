@@ -83,7 +83,17 @@ def load_eval_queries(
     split: str = "test",
     leak_free: bool = True,
     limit: int | None = None,
+    answerable_only: bool = False,
 ) -> list[EvalQuery]:
+    """Load the evaluation pairs.
+
+    ``answerable_only`` keeps just the pairs whose labelled task is in the
+    corpus. It exists because on a one-type corpus the answerable fraction is
+    ~2%, so an unfiltered sample of a few thousand yields a few dozen scorable
+    pairs — too few to decide anything. Filtering measures the engine on the
+    population where it can succeed; the coverage fraction is reported
+    separately and remains the headline limitation.
+    """
     sql = [
         "SELECT d.id, d.defect_text, d.ata_ref, ls.task_number",
         "FROM label_silver ls JOIN defect d ON d.id = ls.defect_id",
@@ -108,6 +118,10 @@ def load_eval_queries(
                   gold=tuple(v["gold"]))
         for did, v in grouped.items() if v["gold"]
     ]
+    if answerable_only:
+        held = corpus_task_keys(con)["strict"]
+        queries = [q for q in queries
+                   if any(strict_key(t) in held for t in q.gold)]
     return queries[:limit] if limit else queries
 
 
@@ -154,6 +168,26 @@ def chapter_of(task_number: str | None) -> str | None:
     return head[:2] if head[:2].isdigit() else None
 
 
+def corpus_task_keys(con: sqlite3.Connection) -> dict[str, set[str]]:
+    """Every task the corpus actually holds, under both matching keys.
+
+    Chapter-level servability is too coarse to explain a zero. A chapter can
+    hold hundreds of 737 MAX tasks while the pair being scored cites a task
+    from a type we have no manual for — the chapter counts as servable and the
+    answer is still absent. This set is what makes the distinction exact:
+    a pair is *answerable* only when the labelled task itself is in the index.
+    """
+    strict: set[str] = set()
+    relaxed: set[str] = set()
+    for (number,) in con.execute(
+            "SELECT task_number FROM task WHERE task_number IS NOT NULL"):
+        strict.add(number.strip().upper())
+        key = relaxed_key(number)
+        if key:
+            relaxed.add(key)
+    return {"strict": strict, "relaxed": relaxed}
+
+
 def servable_chapters(con: sqlite3.Connection) -> set[str]:
     """Chapters holding at least one task row — AMM body or FIM catalogue alike.
 
@@ -178,6 +212,8 @@ class QueryOutcome:
     servable: bool               # any gold chapter has task rows in the corpus
     top1_score: float
     modes: dict
+    answerable: bool = True          # the labelled task itself is in the corpus
+    answerable_relaxed: bool = True  # ...or a sibling of it is
 
 
 def _mode_metrics(run: SearchRun, q: EvalQuery, key_fn, k_hit: int, k_recall: int) -> dict:
@@ -255,6 +291,13 @@ POOL_LABELS = {
                 "retrieval work where a corpus exists', nothing broader.",
     "unservable": "UNSERVABLE chapters only — expected ~0 by construction "
                   "(nothing indexed to retrieve). Anything above 0 is a finding.",
+    "answerable": "ANSWERABLE pairs — the labelled task is in the corpus, so "
+                  "retrieval could have found it. THE ENGINE'S SCORE. Every "
+                  "other pair is a missing manual, not a missed retrieval. "
+                  "Never quote this as overall performance.",
+    "unanswerable": "UNANSWERABLE pairs — the labelled task is not in the "
+                    "corpus at all. Strict recall here is 0 by construction; "
+                    "relaxed can be non-zero when a sibling task is held.",
 }
 
 
@@ -262,6 +305,8 @@ def _pools(outcomes: Sequence[QueryOutcome], threshold: float,
            k_hit: int, k_recall: int) -> list[dict]:
     subsets = {
         "all": list(outcomes),
+        "answerable": [o for o in outcomes if o.answerable],
+        "unanswerable": [o for o in outcomes if not o.answerable],
         "servable": [o for o in outcomes if o.servable],
         "unservable": [o for o in outcomes if not o.servable],
     }
@@ -297,6 +342,7 @@ def evaluate(
     k_hit: int = 5,
     k_recall: int = 50,
     servable: set[str] | None = None,
+    corpus_keys: dict[str, set[str]] | None = None,
 ) -> dict:
     """Run ``search_fn`` over every query and aggregate. ``con_or_none`` is
     accepted so the signature matches the 'connection + search function' contract
@@ -305,11 +351,22 @@ def evaluate(
     if servable is None and con_or_none is not None:
         servable = servable_chapters(con_or_none)
     servable = servable or set()
+    if corpus_keys is None and con_or_none is not None:
+        corpus_keys = corpus_task_keys(con_or_none)
+    held_strict = (corpus_keys or {}).get("strict")
+    held_relaxed = (corpus_keys or {}).get("relaxed")
 
     outcomes: list[QueryOutcome] = []
     for q in queries:
         run = search_fn(q)
         chapters = q.gold_chapters
+        # With no corpus key set supplied, every pair counts as answerable —
+        # the pool then degenerates to "all", which is the honest default for
+        # a caller that did not ask the corpus what it holds.
+        answerable = (True if held_strict is None else
+                      any(strict_key(t) in held_strict for t in q.gold))
+        answerable_relaxed = (True if held_relaxed is None else
+                              any(relaxed_key(t) in held_relaxed for t in q.gold))
         outcomes.append(QueryOutcome(
             defect_id=q.defect_id,
             chapter=chapters[0] if chapters else None,
@@ -318,8 +375,13 @@ def evaluate(
             top1_score=float(run.results[0].score) if run.results else 0.0,
             modes={mode: _mode_metrics(run, q, key_fn, k_hit, k_recall)
                    for mode, key_fn in KEYS.items()},
+            answerable=answerable,
+            answerable_relaxed=answerable_relaxed,
         ))
 
+    n = len(outcomes)
+    n_answerable = sum(1 for o in outcomes if o.answerable)
+    n_answerable_relaxed = sum(1 for o in outcomes if o.answerable_relaxed)
     return {
         "name": name,
         "threshold": threshold,
@@ -328,6 +390,17 @@ def evaluate(
         **_aggregate(outcomes, threshold, k_hit, k_recall),
         "pools": _pools(outcomes, threshold, k_hit, k_recall),
         "by_chapter": _by_chapter(outcomes, servable, threshold, k_hit, k_recall),
+        # The arithmetic ceiling on the headline: no metric over ALL pairs can
+        # exceed this, whatever the engine does.
+        "ceiling": {
+            "n_answerable": n_answerable,
+            "n_answerable_relaxed": n_answerable_relaxed,
+            "max_recall_strict": (n_answerable / n) if n else 0.0,
+            "max_recall_relaxed": (n_answerable_relaxed / n) if n else 0.0,
+            "note": "a pair is answerable when the labelled task is in the "
+                    "corpus; the headline pool cannot exceed this fraction "
+                    "no matter how good retrieval is",
+        },
     }
 
 
@@ -437,8 +510,10 @@ def run_all(
         queries = load_eval_queries(con, split=split, limit=limit)
 
     servable = servable_chapters(con)
+    corpus_keys = corpus_task_keys(con)
     ev = lambda fn, name: evaluate(  # noqa: E731
-        con, fn, name, queries, threshold, servable=servable)
+        con, fn, name, queries, threshold, servable=servable,
+        corpus_keys=corpus_keys)
 
     runs = [
         ev(frequency_fn(con), "baseline: top-20 frequency/ATA"),
@@ -477,6 +552,7 @@ def run_all(
                     "holds at least one task row; unservable pairs are "
                     "unanswerable by construction, not by retrieval failure",
         },
+        "ceiling": runs[0].get("ceiling") if runs else None,
         "reranker_stats": rerank_stats,
         "runs": runs,
     }
@@ -560,6 +636,15 @@ def format_table(report: dict) -> str:
             f"{cov['n_pairs_servable']}/{report['n_queries']} pairs "
             f"({cov['pct_pairs_servable']:.1f}%) are servable, "
             f"{n_un} {'pair has' if n_un == 1 else 'pairs have'} no corpus at all")
+    ceil = report.get("ceiling")
+    if ceil:
+        lines.append(
+            f"CEILING       : the labelled task is in the corpus for "
+            f"{ceil['n_answerable']}/{report['n_queries']} pairs — "
+            f"**no ALL-pairs metric can exceed "
+            f"{ceil['max_recall_strict']:.3f} strict / "
+            f"{ceil['max_recall_relaxed']:.3f} relaxed**, whatever the engine "
+            f"does. Read the answerable pool for retrieval quality.")
     header = (f"{'run':<34}{'stage1':>8}{'R@'+str(k_rec):>8}"
               f"{'NDCG@'+str(k_hit):>9}{'Hit@'+str(k_hit):>8}{'top1':>8}"
               f"{'abstain':>9}{'conf-wrong':>12}")

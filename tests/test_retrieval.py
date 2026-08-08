@@ -585,8 +585,11 @@ def test_pools_split_servable_from_unservable_and_label_the_headline(
         indexed, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
 
     pools = {p["pool"]: p for p in run["pools"]}
-    assert set(pools) == {"all", "servable", "unservable"}
+    assert set(pools) == {"all", "servable", "unservable",
+                          "answerable", "unanswerable"}
     assert pools["all"]["n_queries"] == len(queries) == run["n_queries"]
+    assert (pools["answerable"]["n_queries"] + pools["unanswerable"]["n_queries"]
+            == pools["all"]["n_queries"])
     assert (pools["servable"]["n_queries"] + pools["unservable"]["n_queries"]
             == pools["all"]["n_queries"])
     # the ATA 21 pair has no corpus, so it is unanswerable by construction
@@ -621,6 +624,51 @@ def test_by_chapter_is_sorted_by_n_and_flags_servability(indexed, embedder):
             assert 0.0 <= row[mode]["ndcg_at_5"] <= 1.0
 
 
+def test_answerable_pool_separates_a_missing_manual_from_a_missed_retrieval(
+        indexed, embedder):
+    """The measurement that decides Gate 2 on this corpus.
+
+    A pair whose labelled task is not in the index cannot be retrieved at any
+    rank. Pooling those into the headline measures how much of the fleet's
+    manuals we hold, not how well the engine ranks — so the answerable pool
+    has to be reported next to the ceiling, and the ceiling has to bound the
+    headline exactly.
+    """
+    searcher = _searcher(indexed, embedder)
+    queries = evalharness.load_eval_queries(indexed, split="test")
+    run = evalharness.evaluate(
+        indexed, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
+
+    pools = {p["pool"]: p for p in run["pools"]}
+    ceiling = run["ceiling"]
+    assert ceiling["n_answerable"] == pools["answerable"]["n_queries"]
+
+    # strict recall over ALL pairs can never exceed the answerable fraction
+    assert (pools["all"]["strict"]["recall_at_50"]
+            <= ceiling["max_recall_strict"] + 1e-9)
+
+    # a pair we hold no task for scores zero strictly, by construction
+    assert pools["unanswerable"]["strict"]["recall_at_50"] == 0.0
+    assert pools["unanswerable"]["strict"]["hit_at_5"] == 0.0
+
+    # and the label must forbid quoting the engine's score as overall quality
+    assert "Never quote this as overall performance" in pools["answerable"]["label"]
+
+
+def test_evaluate_without_corpus_keys_treats_every_pair_as_answerable(
+        indexed, embedder):
+    """A caller that does not ask the corpus what it holds gets the honest
+    degenerate case — answerable == all — rather than a silently empty pool."""
+    searcher = _searcher(indexed, embedder)
+    queries = evalharness.load_eval_queries(indexed, split="test")
+    run = evalharness.evaluate(
+        None, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
+    pools = {p["pool"]: p for p in run["pools"]}
+    assert pools["answerable"]["n_queries"] == pools["all"]["n_queries"]
+    assert pools["unanswerable"]["n_queries"] == 0
+    assert run["ceiling"]["max_recall_strict"] == 1.0
+
+
 def test_coverage_summary_and_new_sections_reach_the_output(
         indexed, embedder, tmp_path):
     searcher = _searcher(indexed, embedder)
@@ -641,8 +689,9 @@ def test_coverage_summary_and_new_sections_reach_the_output(
     out = evalharness.write_json(report, tmp_path / "cov.json")
     loaded = json.loads(out.read_text(encoding="utf-8"))
     for run in loaded["runs"]:
-        assert len(run["pools"]) == 3
+        assert len(run["pools"]) == 5
         assert run["by_chapter"]
+        assert run["ceiling"]["n_answerable"] <= loaded["n_queries"]
 
 
 def test_frequency_baseline_prefers_the_precomputed_phase0_table(indexed):

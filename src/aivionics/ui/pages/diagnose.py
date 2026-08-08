@@ -1,29 +1,121 @@
 """Diagnose — symptom in, ranked task *locators* and prior cases out (PLAN 4.4).
 
-The retrieval engine is Phase 2 and is not wired in here yet; this is the
-shell it will populate. The structure is fixed now because two things about
-it are non-negotiable and easier to get right before there is data:
+Wired to the Phase 2 engine through `searchservice`. Three properties of this
+screen are non-negotiable and shaped the layout before there was any data:
 
   * the prior-cases table separates `replaced:` from `found:`. That split is
     the product — everyone retrieves procedures, nobody surfaces what was
-    actually found (PLAN §11.4);
-  * the decision-support footer is present on the screen at all times
-    (PLAN §0.2), not in an About box.
+    actually found (PLAN §11.4). On SDR-mined cases `found:` is honestly
+    reported as *not recorded*, because the shop teardown finding is not in
+    this data at all;
+  * results are **locators**. Task number, title, manual, revision — never the
+    procedure (standing rule 1). The body is reachable in the read-only viewer
+    on the Manuals screen, which is inside the app;
+  * the decision-support footer is on the screen at all times (PLAN §0.2),
+    not in an About box.
+
+Every figure rendered here comes from the database or from the retrieval
+engine's own arithmetic; nothing is generated (standing rule 4).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QPushButton,
-                               QTableWidget, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QStackedWidget,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from .. import theme as T
-from ..widgets import (Card, EmptyState, ProvenanceLine, SectionHeader,
+from ..searchservice import SearchService, SearchSignals, index_status
+from ..widgets import (AtaLocator, EmptyState, ProvenanceLine, SectionHeader,
                        Splitter, Tag, ui_font)
 from .base import Page, caption
 
 CASE_COLUMNS = ["Tail", "Date", "replaced:", "found:"]
+
+CHANNEL_TEXT = {
+    "both": "keyword + semantic",
+    "fts": "keyword match",
+    "dense": "semantic match",
+}
+
+
+class LocatorRow(QFrame):
+    """One ranked task locator. Selectable, never expandable into a body."""
+
+    clicked = Signal(object)
+
+    def __init__(self, rank: int, result, theme: str, parent=None):
+        super().__init__(parent)
+        self.result = result
+        self.theme_name = theme
+        self.selected = False
+        self.setObjectName("LocatorRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(13, 8, 13, 9)
+        lay.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(9)
+        self.rank = QLabel(f"{rank}")
+        self.rank.setObjectName("Faint")
+        self.rank.setFont(ui_font(9, QFont.Weight.DemiBold))
+        self.rank.setFixedWidth(16)
+        top.addWidget(self.rank)
+        self.locator = AtaLocator(result.task_number or "—", theme)
+        top.addWidget(self.locator)
+        top.addStretch(1)
+        prov = result.provenance or {}
+        self.channel = QLabel(CHANNEL_TEXT.get(prov.get("channels", ""), ""))
+        self.channel.setObjectName("Faint")
+        self.channel.setFont(ui_font(8))
+        top.addWidget(self.channel)
+        lay.addLayout(top)
+
+        self.title = QLabel(result.title or "—")
+        self.title.setFont(ui_font(9.5))
+        self.title.setWordWrap(True)
+        lay.addWidget(self.title)
+
+        tags = QHBoxLayout()
+        tags.setSpacing(6)
+        revision = prov.get("manual_revision")
+        label = result.manual_type or "—"
+        if revision:
+            label = f"{label} {revision}"
+        tags.addWidget(Tag(label, theme))
+        if prov.get("catalogue_only"):
+            tags.addWidget(Tag("locator only — no body held", theme))
+        applic = prov.get("applicability")
+        if applic and applic != "resolved":
+            tags.addWidget(Tag(str(applic), theme))
+        if prov.get("jasc_boost"):
+            tags.addWidget(Tag("ATA hint boosted", theme))
+        tags.addStretch(1)
+        lay.addLayout(tags)
+
+        self.refresh_theme(theme)
+
+    def set_selected(self, on: bool) -> None:
+        self.selected = on
+        self.refresh_theme(self.theme_name)
+
+    def refresh_theme(self, theme: str) -> None:
+        self.theme_name = theme
+        pal = T.THEMES[theme]
+        bg = pal["cyq"] if self.selected else pal["s1"]
+        edge = pal["cy"] if self.selected else pal["hair"]
+        self.setStyleSheet(
+            f"#LocatorRow{{background:{bg};border:1px solid {edge};"
+            f"border-radius:5px;}}")
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self)
+        super().mousePressEvent(event)
 
 
 class DiagnosePage(Page):
@@ -31,6 +123,13 @@ class DiagnosePage(Page):
 
     def __init__(self, ctx, parent=None):
         super().__init__(ctx, parent)
+        self.service = SearchService(getattr(ctx, "db_path", None))
+        self.signals = SearchSignals()
+        self.signals.done.connect(self._on_results)
+        self.signals.failed.connect(self._on_failed)
+        self.rows: list[LocatorRow] = []
+        self.selected: LocatorRow | None = None
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -44,6 +143,7 @@ class DiagnosePage(Page):
         outer.addWidget(split, 1)
 
         outer.addWidget(self._footer())
+        self._refresh_status()
 
     # ── query ─────────────────────────────────────────────────────────
     def _query_band(self) -> QWidget:
@@ -75,11 +175,16 @@ class DiagnosePage(Page):
 
         chips = QHBoxLayout()
         chips.setSpacing(7)
+        self.chips: list[Tag] = []
         for text in ("Free text · no fault code", "All ATA chapters",
                      "Effectivity — no tail selected", "Cases 1995–2026"):
-            chips.addWidget(Tag(text, self.theme_name))
+            tag = Tag(text, self.theme_name)
+            self.chips.append(tag)
+            chips.addWidget(tag)
         chips.addStretch(1)
-        self.query_status = caption("retrieval engine not connected", "Faint", 8.5)
+        self.query_status = caption("", "Faint", 8.5)
+        self.query_status.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                        QSizePolicy.Policy.Preferred)
         chips.addWidget(self.query_status)
         lay.addLayout(chips)
         return band
@@ -92,6 +197,8 @@ class DiagnosePage(Page):
         lay.setSpacing(0)
         self.locator_header = SectionHeader("Task locators", "ranked · locator only")
         lay.addWidget(self.locator_header)
+
+        self.locator_stack = QStackedWidget()
         self.locator_empty = EmptyState(
             "mdi6.magnify",
             "No search run yet",
@@ -99,7 +206,47 @@ class DiagnosePage(Page):
             "manual and revision. The procedure itself is never reproduced; the "
             "engineer is sent to the controlled manual.",
             theme=self.theme_name)
-        lay.addWidget(self.locator_empty, 1)
+        self.locator_stack.addWidget(self.locator_empty)
+
+        # A distinct state, not a reworded one: EmptyState sizes its body at
+        # construction, so replacing the text of a live one clips it.
+        self.locator_nomatch = EmptyState(
+            "mdi6.file-search-outline",
+            "Nothing matched",
+            "No task in the ingested corpus matched this symptom. The corpus "
+            "holds one aircraft type and ten AMM chapters, so a miss here is "
+            "as likely to be a coverage gap as a retrieval failure — check the "
+            "chapter coverage on the Manuals screen before concluding either.",
+            theme=self.theme_name)
+        self.locator_stack.addWidget(self.locator_nomatch)
+
+        self.results_host = QWidget()
+        self.results_lay = QVBoxLayout(self.results_host)
+        self.results_lay.setContentsMargins(11, 10, 11, 10)
+        self.results_lay.setSpacing(7)
+        self.results_lay.addStretch(1)
+        self.results_area = QScrollArea()
+        self.results_area.setWidgetResizable(True)
+        self.results_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.results_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results_area.setWidget(self.results_host)
+        self.locator_stack.addWidget(self.results_area)
+        lay.addWidget(self.locator_stack, 1)
+
+        actions = QFrame()
+        actions.setObjectName("PageHeader")
+        actions.setFixedHeight(44)
+        arow = QHBoxLayout(actions)
+        arow.setContentsMargins(13, 0, 13, 0)
+        arow.setSpacing(9)
+        self.selection_label = caption("no locator selected", "Faint", 8.5)
+        arow.addWidget(self.selection_label, 1)
+        self.print_btn = QPushButton("Print locator")
+        self.print_btn.setEnabled(False)
+        self.print_btn.clicked.connect(self._print_selected)
+        arow.addWidget(self.print_btn)
+        lay.addWidget(actions)
         return panel
 
     # ── right column: prior cases ─────────────────────────────────────
@@ -120,6 +267,7 @@ class DiagnosePage(Page):
         self.cases.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cases.setShowGrid(False)
         self.cases.setAlternatingRowColors(True)
+        self.cases.setWordWrap(False)
         header = self.cases.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft
                                    | Qt.AlignmentFlag.AlignVCenter)
@@ -153,16 +301,118 @@ class DiagnosePage(Page):
         return foot
 
     # ── behaviour ─────────────────────────────────────────────────────
-    def run_search(self) -> None:
-        """Placeholder until Phase 2 lands.
+    def on_shown(self) -> None:
+        self._refresh_status()
 
-        It reports honestly rather than pretending to search, because a
-        fake result set in a safety tool is worse than no result set.
-        """
+    def _refresh_status(self) -> None:
+        """Report exactly what the engine can and cannot do right now."""
+        status = index_status(getattr(self.ctx, "corpus", None)
+                              and self.ctx.corpus.con)
+        self.index_ready = status.ready
+        if status.ready:
+            self.query_status.setText(
+                f"{status.task_vectors:,} task locators · "
+                f"{status.case_vectors:,} cases indexed")
+        else:
+            self.query_status.setText(status.reason)
+        self.search_btn.setEnabled(True)
+
+    def run_search(self) -> None:
         text = self.query.text().strip()
         if not text:
             self.query_status.setText("enter a symptom to search")
             return
+        if not getattr(self, "index_ready", False):
+            self._refresh_status()
+            if not self.index_ready:
+                return
+        if not self.service.submit(text, self.signals):
+            self.query_status.setText("a search is already running")
+            return
+        self.search_btn.setEnabled(False)
+        self.query_status.setText("searching — first query loads the index…")
+
+    def _on_results(self, result: dict) -> None:
+        self.search_btn.setEnabled(True)
+        run = result["tasks"]
+        self._render_locators(run)
+        self._render_cases(result["case_rows"])
+        kind = "exact token" if run.exact_query else "free text"
         self.query_status.setText(
-            "retrieval engine not connected — Gate 2 must pass before this "
-            "returns results")
+            f"{len(run.results)} of {run.stage1_size} candidates · {kind} · "
+            f"keyword weight {run.weights['fts']:.2f} / "
+            f"semantic {run.weights['dense']:.2f}")
+
+    def _on_failed(self, query: str, message: str) -> None:
+        self.search_btn.setEnabled(True)
+        self.query_status.setText(f"search failed — {message}")
+
+    def _render_locators(self, run) -> None:
+        for row in self.rows:
+            row.setParent(None)
+        self.rows.clear()
+        self.selected = None
+        self.print_btn.setEnabled(False)
+        self.selection_label.setText("no locator selected")
+
+        if not run.results:
+            self.locator_header.set_right("no match · locator only")
+            self.locator_stack.setCurrentWidget(self.locator_nomatch)
+            return
+
+        for i, result in enumerate(run.results, 1):
+            row = LocatorRow(i, result, self.theme_name)
+            row.clicked.connect(self._select_row)
+            self.results_lay.insertWidget(self.results_lay.count() - 1, row)
+            self.rows.append(row)
+        self.locator_header.set_right(
+            f"{len(run.results)} shown · locator only")
+        self.locator_stack.setCurrentWidget(self.results_area)
+
+    def _select_row(self, row: LocatorRow) -> None:
+        for other in self.rows:
+            other.set_selected(other is row)
+        self.selected = row
+        self.print_btn.setEnabled(True)
+        self.selection_label.setText(row.result.task_number or "—")
+
+    def _print_selected(self) -> None:
+        if self.selected is None:
+            return
+        result = self.selected.result
+        prov = result.provenance or {}
+        task = {
+            "task_number": result.task_number,
+            "title": result.title,
+            "effectivity_raw": prov.get("applicability"),
+            "id": result.id,
+        }
+        manual = {
+            "manual_type": result.manual_type,
+            "revision": prov.get("manual_revision"),
+        }
+        self.ctx.print_locator(task, manual)
+
+    def _render_cases(self, rows) -> None:
+        self.cases.setRowCount(len(rows))
+        pal = T.THEMES[self.theme_name]
+        for r, case in enumerate(rows):
+            for c, text in enumerate((case.tail, case.reported_at,
+                                      case.replaced, case.found)):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                if c == 3 and not case.found_recorded:
+                    item.setForeground(Qt.GlobalColor.gray)
+                    item.setToolTip(
+                        "SDR records what was reported and what was replaced. "
+                        "The shop teardown finding is not in this data.")
+                self.cases.setItem(r, c, item)
+        recorded = sum(1 for case in rows if case.found_recorded)
+        self.cases_header.set_right(
+            f"{len(rows)} cases · {recorded} with a recorded finding")
+        _ = pal
+
+    def refresh_theme(self, theme: str) -> None:
+        super().refresh_theme(theme)
+        for row in self.rows:
+            row.refresh_theme(theme)

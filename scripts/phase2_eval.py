@@ -44,6 +44,11 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--fake", action="store_true",
                     help="hashed offline embedder — must match how the index was built")
+    ap.add_argument("--answerable-only", action="store_true",
+                    help="keep only pairs whose labelled task is in the corpus. "
+                         "Measures the engine rather than the size of the "
+                         "manual collection; report the coverage fraction "
+                         "alongside it, never instead of it")
     args = ap.parse_args()
 
     con = db.connect(Path(args.db))
@@ -61,7 +66,9 @@ def main() -> int:
               f"run scripts/phase2_index.py first")
         return 1
 
-    queries = evalharness.load_eval_queries(con, split=args.split, limit=args.limit)
+    queries = evalharness.load_eval_queries(
+        con, split=args.split, limit=args.limit,
+        answerable_only=args.answerable_only)
     if not queries:
         print(f"no leak-free labelled queries in split '{args.split}' — "
               f"Phase 0 must finish first")
@@ -75,6 +82,7 @@ def main() -> int:
         split=args.split, top_k=args.top_k)
     report["elapsed_s"] = round(time.time() - start, 1)
     report["reranker"] = args.rerank
+    report["answerable_only"] = bool(args.answerable_only)
 
     print()
     print(evalharness.format_table(report))
