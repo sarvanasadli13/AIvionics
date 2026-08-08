@@ -90,6 +90,7 @@ class SearchRun:
     exact_query: bool
     channels: dict = field(default_factory=dict)
     reranked: bool = False
+    confidence: dict = field(default_factory=dict)
 
     @property
     def stage1_size(self) -> int:
@@ -320,6 +321,15 @@ class Searcher:
                 qvec = self.embedder.embed([query])[0]
                 dense_raw = dense_search(qvec, ids, mat, pool_k)
 
+        # Absolute signals, captured BEFORE normalisation. `_max_norm` divides
+        # by the maximum, so the best hit always scores exactly 1.0 and the
+        # merged top-1 never drops below the abstention threshold — the system
+        # cannot decline to answer, which is what drove the confident-and-wrong
+        # rate to 0.95. A usable confidence has to survive normalisation, so it
+        # is taken from the raw cosine and the separation between the top two.
+        raw_dense_top = max(dense_raw.values()) if dense_raw else 0.0
+        raw_fts_top = max(fts_raw.values()) if fts_raw else 0.0
+
         fts_n, dense_n = _max_norm(fts_raw), _max_norm(dense_raw)
         merged = {
             rid: weights["fts"] * fts_n.get(rid, 0.0)
@@ -339,10 +349,21 @@ class Searcher:
             results = (list(head) + ranked[rerank_k:])[:top_k]
             reranked = True
 
+        margin = (ranked[0].score - ranked[1].score) if len(ranked) > 1 else (
+            ranked[0].score if ranked else 0.0)
+        top_channels = ranked[0].provenance.get("channels") if ranked else None
+
         return SearchRun(
             query=query, ranked=ranked, results=results, weights=weights,
             exact_query=exact, reranked=reranked,
             channels={"fts": len(fts_raw), "dense": len(dense_raw)},
+            confidence={
+                "raw_dense_top": round(raw_dense_top, 6),
+                "raw_fts_top": round(raw_fts_top, 6),
+                "margin": round(margin, 6),
+                "top_channels": top_channels,
+                "n_candidates": len(ranked),
+            },
         )
 
     # ── result construction ──────────────────────────────────────────────

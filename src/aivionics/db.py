@@ -7,6 +7,7 @@ titles and applicability refs.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -305,7 +306,26 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     return con
 
 
+# The `note` table named in a table position — FROM/JOIN/INTO/UPDATE — with the
+# optional quoting SQLite accepts. Deliberately not a bare word match: `note` is
+# also a *column* on label_gold, and refusing "SELECT note FROM label_gold"
+# would make the guard something people route around.
+_NOTE_TABLE_REF = re.compile(
+    r"""\b(?:from|join|into|update)\s+["'\[`]?note["'\]`]?\b""", re.IGNORECASE)
+
+
 def stats_guard(sql: str) -> None:
-    """Standing rule (Phase 4C): no statistics query may touch the note table."""
-    if "note" in sql.lower().split():
-        raise ValueError("statistics queries must not reference the note table")
+    """Refuse any aggregate query that reads the note table (PLAN 4C rule 2).
+
+    Notes are evidence a human reads: never training data, never a row in an
+    aggregate view. Two reasons, and the second is the one that bites. Notes
+    are free text an engineer wrote for themselves, so counting them measures
+    who writes notes rather than what breaks — and a system that reports per
+    engineer is performance monitoring under BetrVG §87(1)(6). Once engineers
+    believe their notes are counted, the notes get vaguer and the only source
+    of `what was actually found` is poisoned at the point of capture.
+    """
+    if _NOTE_TABLE_REF.search(sql or ""):
+        raise ValueError(
+            "statistics queries must not reference the note table — notes are "
+            "evidence a human reads, never an input to an aggregate")
