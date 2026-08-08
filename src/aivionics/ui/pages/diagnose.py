@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout,
                                QWidget)
 
 from .. import theme as T
+from ..notespanel import NotesPanel
 from ..searchservice import SearchService, SearchSignals, index_status
 from ..widgets import (AtaLocator, EmptyState, ProvenanceLine, SectionHeader,
                        Splitter, Tag, ui_font)
@@ -304,7 +305,12 @@ class DiagnosePage(Page):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.cases.currentCellChanged.connect(self._on_case_selected)
         lay.addWidget(self.cases, 1)
+
+        self.notes = NotesPanel(self.ctx, show_anchor=False)
+        self.notes.setMaximumHeight(300)
+        lay.addWidget(self.notes)
 
         self.cases_note = ProvenanceLine(
             "SDR-mined proxy · a reportable-occurrence sample, not a measured "
@@ -445,7 +451,18 @@ class DiagnosePage(Page):
         }
         self.ctx.print_locator(task, manual)
 
+    def _on_case_selected(self, row: int, *_args) -> None:
+        """Anchor the notes panel to the selected case.
+
+        A note has to hang off a real object — the schema forbids a
+        free-floating one — so the panel is inert until a case is chosen.
+        """
+        ids = getattr(self, "_case_ids", [])
+        if 0 <= row < len(ids):
+            self.notes.set_anchor("defect", str(ids[row]))
+
     def _render_cases(self, rows) -> None:
+        self._case_ids = [getattr(r, "defect_id", None) for r in rows]
         self.cases.setRowCount(len(rows))
         pal = T.THEMES[self.theme_name]
         for r, case in enumerate(rows):

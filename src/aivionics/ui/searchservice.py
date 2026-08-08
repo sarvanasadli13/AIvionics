@@ -74,6 +74,7 @@ class CaseRow:
     found_recorded: bool
     sdr_year: int | None = None
     score: float = 0.0
+    defect_id: int | None = None      # the anchor a note hangs off
 
 
 def case_rows(con: sqlite3.Connection, ids: list[int]) -> dict[int, CaseRow]:
@@ -98,6 +99,7 @@ def case_rows(con: sqlite3.Connection, ids: list[int]) -> dict[int, CaseRow]:
     ):
         recorded = bool(ftype or ftext)
         out[did] = CaseRow(
+            defect_id=did,
             tail=(tail or "—").strip(),
             reported_at=(at or "—"),
             replaced=" ".join((rect or "").split()) or "—",
