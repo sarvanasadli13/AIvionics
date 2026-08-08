@@ -88,15 +88,12 @@ def _best_threshold(samples: list[tuple[float, bool]],
     best: Threshold | None = None
     correct = 0
     # Walk down the score order; at each point the answered set is the prefix.
+    # Keep the *last* prefix that still meets the bar — that is the deepest
+    # cut-off satisfying it, i.e. the most coverage for the same precision.
     for i, (score, ok) in enumerate(ordered, start=1):
         correct += bool(ok)
-        precision = correct / i
-        coverage = i / n
-        cand = Threshold("", "", score, n, precision, coverage)
-        if precision >= target:
-            best = cand                     # keep going: more coverage, same bar
-        elif best is None and (cand.precision > (0.0 if best is None else best.precision)):
-            pass
+        if correct / i >= target:
+            best = Threshold("", "", score, n, correct / i, i / n)
     if best is not None:
         return best
 

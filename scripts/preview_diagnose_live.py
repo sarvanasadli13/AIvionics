@@ -47,6 +47,7 @@ class _Ctx:
 
 def main() -> int:
     query = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_QUERY
+    name = sys.argv[2] if len(sys.argv) > 2 else "diagnose-live"
     app = QApplication.instance() or QApplication(sys.argv[:1])
 
     for theme in ("light", "dark"):
@@ -73,7 +74,7 @@ def main() -> int:
         for _ in range(8):
             app.processEvents()
         suffix = "" if theme == "light" else "-dark"
-        path = OUT / f"ui-preview-diagnose-live{suffix}.png"
+        path = OUT / f"ui-preview-{name}{suffix}.png"
         page.grab().save(str(path))
         print(f"  {path.name}  ({len(result['tasks'].results)} locators, "
               f"{len(result['case_rows'])} cases)")

@@ -122,6 +122,7 @@ class SearchService:
         self.db_path = Path(db_path or config.DB_PATH)
         self.index_version = index_version or config.INDEX_VERSION
         self._searcher = None
+        self._calibrator = None
         self._con: sqlite3.Connection | None = None
         self._pool = QThreadPool.globalInstance()
         self.busy = False
@@ -144,6 +145,19 @@ class SearchService:
                 self._connect(), FastEmbedder(), index_version=self.index_version)
         return self._searcher
 
+    def calibrator(self):
+        """Fitted abstention thresholds, or an empty one that never abstains.
+
+        An uncalibrated install must answer rather than silently suppress
+        everything — the failure mode of a missing calibration table should be
+        visible behaviour, not an app that appears to find nothing.
+        """
+        if self._calibrator is None:
+            from ..retrieval.calibration import Calibrator
+            self._calibrator = Calibrator.load(self._connect(),
+                                               self.index_version)
+        return self._calibrator
+
     def status(self) -> IndexStatus:
         try:
             return index_status(self._connect(), self.index_version)
@@ -152,10 +166,12 @@ class SearchService:
                                reason=f"database unavailable — {exc}")
 
     # ── one query ────────────────────────────────────────────────────────
-    def run(self, query: str, *, top_k: int = 20, cases_k: int = 12) -> dict:
+    def run(self, query: str, *, top_k: int = 20, cases_k: int = 12,
+            jasc: str | None = None) -> dict:
         """Blocking search. Called on the worker thread, never on the UI one."""
         searcher = self.searcher()
-        tasks = searcher.search(query, kind="task", top_k=top_k, rerank=False)
+        tasks = searcher.search(query, kind="task", top_k=top_k, rerank=False,
+                                jasc=jasc)
         cases = searcher.search(query, kind="case", top_k=cases_k, rerank=False)
         con = self._connect()
         ids = [r.id for r in cases.results if r.id is not None]
@@ -164,11 +180,23 @@ class SearchService:
             row = rows.get(r.id)
             if row is not None:
                 row.score = r.score
+        # The abstention decision, made against signals that survive score
+        # normalisation. Chapter comes from the top result rather than the
+        # query: the JASC hint is what a reporter typed and is miscoded at
+        # chapter boundaries.
+        cal = self.calibrator()
+        chapter = tasks.results[0].ata_chapter if tasks.results else None
+        abstain = bool(tasks.results) and cal.should_abstain(
+            chapter, tasks.confidence)
         return {
             "query": query,
             "tasks": tasks,
             "cases": cases,
             "case_rows": [rows[i] for i in ids if i in rows],
+            "abstain": abstain,
+            "calibrated": cal.fitted,
+            "calibration_note": cal.explain(chapter),
+            "chapter": chapter,
         }
 
     # ── async wrapper ────────────────────────────────────────────────────
@@ -185,6 +213,7 @@ class SearchService:
             self._con.close()
             self._con = None
         self._searcher = None
+        self._calibrator = None
 
 
 class SearchSignals(QObject):

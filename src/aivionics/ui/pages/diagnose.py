@@ -230,6 +230,21 @@ class DiagnosePage(Page):
             theme=self.theme_name)
         self.locator_stack.addWidget(self.locator_nomatch)
 
+        # Abstention is a first-class answer, not an empty result. The engine
+        # could not previously produce it at all: max-normalisation pins the
+        # top score at 1.0, so no absolute threshold could ever fire and 94% of
+        # queries returned a confident wrong locator.
+        self.locator_abstain = EmptyState(
+            "mdi6.help-circle-outline",
+            "No confident match — escalate to a licensed engineer",
+            "Candidates were found, but none clears the confidence threshold "
+            "fitted for this ATA chapter, so none is shown as an answer. In a "
+            "maintenance tool a confident wrong locator is worse than no "
+            "locator. Use 'Show candidates anyway' only as a starting point "
+            "for your own search of the controlled manual.",
+            theme=self.theme_name)
+        self.locator_stack.addWidget(self.locator_abstain)
+
         self.results_host = QWidget()
         self.results_lay = QVBoxLayout(self.results_host)
         self.results_lay.setContentsMargins(11, 10, 11, 10)
@@ -252,6 +267,10 @@ class DiagnosePage(Page):
         arow.setSpacing(9)
         self.selection_label = caption("no locator selected", "Faint", 8.5)
         arow.addWidget(self.selection_label, 1)
+        self.override_btn = QPushButton("Show candidates anyway")
+        self.override_btn.setVisible(False)
+        self.override_btn.clicked.connect(self._show_anyway)
+        arow.addWidget(self.override_btn)
         self.print_btn = QPushButton("Print locator")
         self.print_btn.setEnabled(False)
         self.print_btn.clicked.connect(self._print_selected)
@@ -345,19 +364,23 @@ class DiagnosePage(Page):
     def _on_results(self, result: dict) -> None:
         self.search_btn.setEnabled(True)
         run = result["tasks"]
-        self._render_locators(run)
+        self._last_run = run
+        self._render_locators(run, abstain=result.get("abstain", False))
         self._render_cases(result["case_rows"])
         kind = "exact token" if run.exact_query else "free text"
+        note = result.get("calibration_note", "")
+        if not result.get("calibrated"):
+            note = "not calibrated — run scripts/phase2_calibrate.py"
         self.query_status.setText(
             f"{len(run.results)} of {run.stage1_size} candidates · {kind} · "
-            f"keyword weight {run.weights['fts']:.2f} / "
-            f"semantic {run.weights['dense']:.2f}")
+            f"keyword {run.weights['fts']:.2f} / semantic "
+            f"{run.weights['dense']:.2f} · {note}")
 
     def _on_failed(self, query: str, message: str) -> None:
         self.search_btn.setEnabled(True)
         self.query_status.setText(f"search failed — {message}")
 
-    def _render_locators(self, run) -> None:
+    def _render_locators(self, run, abstain: bool = False) -> None:
         for row in self.rows:
             row.setParent(None)
         self.rows.clear()
@@ -367,8 +390,16 @@ class DiagnosePage(Page):
 
         if not run.results:
             self.locator_header.set_right("no match · locator only")
+            self.override_btn.setVisible(False)
             self.locator_stack.setCurrentWidget(self.locator_nomatch)
             return
+
+        if abstain:
+            self.locator_header.set_right("below confidence threshold")
+            self.override_btn.setVisible(True)
+            self.locator_stack.setCurrentWidget(self.locator_abstain)
+            return
+        self.override_btn.setVisible(False)
 
         for i, result in enumerate(run.results, 1):
             row = LocatorRow(i, result, self.theme_name)
@@ -378,6 +409,17 @@ class DiagnosePage(Page):
         self.locator_header.set_right(
             f"{len(run.results)} shown · locator only")
         self.locator_stack.setCurrentWidget(self.results_area)
+
+    def _show_anyway(self) -> None:
+        """Deliberate override. The engineer asked for the candidates after
+        being told they are below the bar, so they are shown and labelled — not
+        promoted to an answer."""
+        run = getattr(self, "_last_run", None)
+        if run is None:
+            return
+        self.override_btn.setVisible(False)
+        self._render_locators(run, abstain=False)
+        self.locator_header.set_right("below threshold · shown on request")
 
     def _select_row(self, row: LocatorRow) -> None:
         for other in self.rows:
