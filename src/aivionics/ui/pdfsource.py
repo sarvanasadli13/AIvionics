@@ -50,6 +50,10 @@ def resolve_chapter_pdf(chapter: str, source_dir: Path | str | None = None
             # A per-file manual row: use it directly if it is the right chapter.
             return path if _readable(path) else None
         candidates.append(path)
+    # Repaired chapters first: for the six that lost their first MiB the file
+    # in the corpus directory exists but no reader can open it, so preferring
+    # the original would hand the viewer a PDF with no pages.
+    candidates.append(config.AMM_REPAIRED_DIR)
     candidates.append(config.AMM_DIR)
 
     chapter = str(chapter).strip().zfill(2)

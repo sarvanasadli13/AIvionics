@@ -54,6 +54,28 @@ def upsert_manual(con, oem, actype, mtype, doc_std, source, revision):
     return cur.lastrowid
 
 
+def chapter_sources() -> list[Path]:
+    """One PDF per ATA chapter, preferring a repaired rebuild where one exists.
+
+    Six chapters lost the first MiB of their file and keep their objects in
+    compressed streams, so the copy in the corpus directory opens with zero
+    pages. `scripts/repair_amm.py` rebuilds those; where a rebuild is present
+    it is the only readable version and wins.
+    """
+    by_chapter: dict[str, Path] = {}
+    for pdf in sorted(config.AMM_DIR.glob("*.pdf")):
+        by_chapter[pdf.name[:2]] = pdf
+    repaired = 0
+    if config.AMM_REPAIRED_DIR.is_dir():
+        for pdf in sorted(config.AMM_REPAIRED_DIR.glob("*.pdf")):
+            by_chapter[pdf.name[:2]] = pdf
+            repaired += 1
+    if repaired:
+        print(f"  using {repaired} repaired chapter PDF(s) from "
+              f"{config.AMM_REPAIRED_DIR}")
+    return [by_chapter[k] for k in sorted(by_chapter)]
+
+
 def run_amm(con) -> None:
     parser = get_parser("boeing")
     mid = upsert_manual(con, "boeing", "737-8", "AMM", "ispec2200",
@@ -61,7 +83,7 @@ def run_amm(con) -> None:
     total = 0
     dupes = 0
     failed = []
-    for pdf in sorted(config.AMM_DIR.glob("*.pdf")):
+    for pdf in chapter_sources():
         ch = pdf.name[:2]
         try:
             tasks, mentions = parser.extract_chapter(pdf)

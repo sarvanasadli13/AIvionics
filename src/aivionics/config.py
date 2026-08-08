@@ -18,6 +18,12 @@ CORPUS_ROOT = Path(os.environ.get(
 AMM_DIR = CORPUS_ROOT / "AMM"
 IFIM_DIR = CORPUS_ROOT / "IFIM" / "fim"
 
+# Structurally repaired chapter PDFs (scripts/repair_amm.py). Six chapters are
+# missing the first MiB of their file and store objects in compressed streams,
+# so nothing will open them until they are rebuilt. Derived artefacts:
+# regenerable from the corpus, never committed.
+AMM_REPAIRED_DIR = DATA_DIR / "amm_repaired"
+
 # Embedding / index versioning. Changing the model invalidates every vector:
 # bump INDEX_VERSION whenever EMBED_MODEL changes (standing rule 9).
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
