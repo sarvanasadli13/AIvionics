@@ -19,7 +19,8 @@ from aivionics.retrieval.embedder import FakeEmbedder, blob_to_vec
 from aivionics.retrieval.rerank import (
     FlashRankReranker, LLMReranker, NullReranker, parse_index_order)
 from aivionics.retrieval.search import (
-    Effectivity, SearchResult, Searcher, build_fts_match, has_exact_token)
+    Effectivity, SearchResult, SearchRun, Searcher, build_fts_match,
+    has_exact_token)
 
 # (task_number, function_code, chapter, section, subject, title, catalogue_only)
 AMM_TASKS = [
@@ -65,6 +66,10 @@ DEFECTS = [
      "34", "34-21-00-810-805", "test"),
     ("STANDBY ATTITUDE INDICATOR FLAG IN VIEW ON GROUND.",
      "34", "34-21-05-000-801", "test"),
+    # ATA 21 is one of the six image-only chapters — no task rows exist, so this
+    # pair is unanswerable by construction and must land in the unservable pool
+    ("CABIN PRESSURE CONTROLLER FAULT, MANUAL MODE USED IN CRUISE.",
+     "21", "21-31-01-400-801", "test"),
     ("PITOT HEAT INOPERATIVE ON PREFLIGHT CHECK.",
      "34", "34-11-01-400-801", "train"),
     ("AIRSPEED UNRELIABLE ON TAKEOFF ROLL.",
@@ -462,6 +467,26 @@ def test_load_eval_queries_groups_gold_by_defect(indexed):
     assert queries[0].jasc == "34"
 
 
+def test_ndcg_never_exceeds_one_when_siblings_share_a_relaxed_key():
+    """-801 and -802 collapse to the same relaxed key. One gold item may only
+    be credited once, at its best rank, or NDCG climbs above 1."""
+    q = evalharness.EvalQuery(defect_id=1, query="pitot", jasc="34",
+                              gold=("34-11-01-400-801",))
+    siblings = [
+        SearchResult(kind="task", id=i, score=1.0 - i * 0.1, task_number=tn)
+        for i, tn in enumerate(["34-11-01-400-801", "34-11-01-400-802",
+                                "34-11-01-400-803", "23-11-01-400-801",
+                                "27-11-05-400-801"])
+    ]
+    run = SearchRun(query=q.query, ranked=siblings, results=siblings,
+                    weights={}, exact_query=False)
+    strict = evalharness._mode_metrics(run, q, evalharness.strict_key, 5, 50)
+    relaxed = evalharness._mode_metrics(run, q, evalharness.relaxed_key, 5, 50)
+    assert strict["ndcg_at_k"] == 1.0
+    assert relaxed["ndcg_at_k"] == 1.0        # was 1.63 before the fix
+    assert relaxed["hit_at_k"] and relaxed["top1_correct"]
+
+
 def test_relaxed_key_ignores_the_sequence_number():
     assert evalharness.relaxed_key("34-11-01-400-801") == "34-11-01-400"
     assert (evalharness.relaxed_key("34-11-01-400-801")
@@ -524,6 +549,100 @@ def test_hybrid_beats_the_frequency_baseline_on_the_fixture(indexed, embedder):
         indexed, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
     assert hybrid["strict"]["ndcg_at_5"] > freq["strict"]["ndcg_at_5"]
     assert hybrid["strict"]["recall_at_50"] >= freq["strict"]["recall_at_50"]
+
+
+@pytest.mark.parametrize("task_number, expected", [
+    ("34-11-01-400-801", "34"),
+    ("G73-00-00-810-A73", "73"),          # engine letter prefix
+    ("71-00-00-800-801-G00", "71"),       # six-group engine form
+    ("", None),
+    (None, None),
+])
+def test_chapter_of(task_number, expected):
+    assert evalharness.chapter_of(task_number) == expected
+
+
+def test_servable_chapters_covers_amm_and_fim_alike(indexed):
+    servable = evalharness.servable_chapters(indexed)
+    assert "34" in servable and "23" in servable
+    assert "73" in servable, "FIM catalogue rows make a chapter servable too"
+    assert "21" not in servable, "ATA 21 has no task rows in the fixture"
+
+
+def test_gold_chapters_come_from_the_label_not_the_jasc_hint(indexed):
+    """The JASC hint is what the reporter typed and is miscoded at chapter
+    boundaries; coverage is a fact about the label and the corpus."""
+    q = evalharness.EvalQuery(defect_id=1, query="x", jasc="34",
+                              gold=("23-11-01-400-801",))
+    assert q.gold_chapters == ("23",)
+
+
+def test_pools_split_servable_from_unservable_and_label_the_headline(
+        indexed, embedder):
+    searcher = _searcher(indexed, embedder)
+    queries = evalharness.load_eval_queries(indexed, split="test")
+    run = evalharness.evaluate(
+        indexed, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
+
+    pools = {p["pool"]: p for p in run["pools"]}
+    assert set(pools) == {"all", "servable", "unservable"}
+    assert pools["all"]["n_queries"] == len(queries) == run["n_queries"]
+    assert (pools["servable"]["n_queries"] + pools["unservable"]["n_queries"]
+            == pools["all"]["n_queries"])
+    # the ATA 21 pair has no corpus, so it is unanswerable by construction
+    assert pools["unservable"]["n_queries"] == 1
+    assert pools["unservable"]["strict"]["recall_at_50"] == 0.0
+    assert pools["unservable"]["strict"]["hit_at_5"] == 0.0
+    # excluding the hole must not be quotable as the headline
+    assert "HEADLINE" in pools["all"]["label"]
+    assert "NOT the headline" in pools["servable"]["label"]
+    # and the servable pool should read better than the pooled headline
+    assert (pools["servable"]["strict"]["recall_at_50"]
+            >= pools["all"]["strict"]["recall_at_50"])
+
+
+def test_by_chapter_is_sorted_by_n_and_flags_servability(indexed, embedder):
+    searcher = _searcher(indexed, embedder)
+    queries = evalharness.load_eval_queries(indexed, split="test")
+    run = evalharness.evaluate(
+        indexed, evalharness.hybrid_fn(searcher, rerank=False), "hybrid", queries)
+
+    rows = run["by_chapter"]
+    assert sum(r["n_queries"] for r in rows) == run["n_queries"]
+    assert [r["n_queries"] for r in rows] == sorted(
+        (r["n_queries"] for r in rows), reverse=True)
+    by_ch = {r["ata_chapter"]: r for r in rows}
+    assert by_ch["34"]["servable"] is True
+    assert by_ch["34"]["chapter_name"] == "Navigation"
+    assert by_ch["21"]["servable"] is False
+    assert by_ch["21"]["strict"]["recall_at_50"] == 0.0
+    for row in rows:
+        for mode in ("strict", "relaxed"):
+            assert 0.0 <= row[mode]["ndcg_at_5"] <= 1.0
+
+
+def test_coverage_summary_and_new_sections_reach_the_output(
+        indexed, embedder, tmp_path):
+    searcher = _searcher(indexed, embedder)
+    report = evalharness.run_all(indexed, searcher, split="test")
+
+    cov = report["coverage"]
+    assert cov["n_pairs_unservable"] == 1
+    assert cov["n_pairs_servable"] == report["n_queries"] - 1
+    assert "21" not in cov["servable_chapters"]
+    assert 0.0 < cov["pct_pairs_servable"] < 100.0
+
+    table = evalharness.format_table(report)
+    assert "coverage pools" in table
+    assert "per-ATA-chapter" in table
+    assert "unservable" in table
+    assert "srv" in table
+    # the JSON must carry the same structure, for every run
+    out = evalharness.write_json(report, tmp_path / "cov.json")
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    for run in loaded["runs"]:
+        assert len(run["pools"]) == 3
+        assert run["by_chapter"]
 
 
 def test_frequency_baseline_prefers_the_precomputed_phase0_table(indexed):

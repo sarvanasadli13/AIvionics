@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIvionics — Fault Lookup</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   TOKENS — white and sky blue.
+
+   LIGHT is the primary theme: white surfaces, a sky-tinted ground,
+   sky-blue borders (not neutral grey — the tint in the hairlines is
+   what makes the whole app read as sky blue rather than "white app
+   with a blue button").
+   DARK is the same identity at night: deep navy, not graphite.
+
+   --cy   accent for text and icons   (AA on its own surface)
+   --cyf  accent for solid fills      (buttons, bars — white text on it)
+   --cyq  quiet accent wash
+   Accent is never red/amber/green. Those are status only.
+   ══════════════════════════════════════════════════════════════ */
+:root[data-theme="light"]{
+  --bg:#EAF2F9; --grid:rgba(20,80,140,.052);
+  --s1:#FFFFFF; --s2:#F6FAFD; --s3:#E6F1FA; --well:#FFFFFF;
+  --line:#CBE0F0; --hair:#E4EFF8; --edge:rgba(20,70,120,.05);
+  --txt:#0F1F2C; --txt2:#48607A; --txt3:#7A93AB;
+  --cy:#0E74BC; --cyf:#2E9BE0; --cyq:#E2F1FC; --cyl:#0A5A93;
+  --amb:#95600A; --ambq:#FCF0DA; --ambl:#764A00;
+  --red:#BE262C; --redq:#FCE3E4; --redl:#94181D;
+  --grn:#1B7642; --grnq:#DDF0E5; --grnl:#11552F;
+  --sh:0 1px 2px rgba(15,60,105,.09),0 8px 22px -14px rgba(15,60,105,.30);
+  --shs:0 1px 0 rgba(255,255,255,.95) inset;
+}
+:root[data-theme="dark"]{
+  --bg:#08131E; --grid:rgba(120,180,235,.036);
+  --s1:#0F1C29; --s2:#152435; --s3:#1D3043; --well:#061019;
+  --line:#22394E; --hair:#182838; --edge:rgba(255,255,255,.05);
+  --txt:#DCE9F5; --txt2:#93AEC6; --txt3:#63809A;
+  --cy:#5BB4F0; --cyf:#3E9FE0; --cyq:#0D2F4A; --cyl:#95D2F8;
+  --amb:#F0A93B; --ambq:#3A2A10; --ambl:#F3C77E;
+  --red:#F2555A; --redq:#3A1418; --redl:#F79EA1;
+  --grn:#46B36A; --grnq:#12301E; --grnl:#8AD3A2;
+  --sh:0 1px 2px rgba(0,0,0,.5),0 6px 18px -8px rgba(0,0,0,.72);
+  --shs:0 1px 0 rgba(255,255,255,.04) inset;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--txt); overflow:hidden;
+  font:13px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+                   linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:34px 34px;
+  transition:background-color .28s ease,color .28s ease;
+}
+.mono{font-family:"Cascadia Mono","Cascadia Code",Consolas,ui-monospace,monospace;
+      font-variant-numeric:tabular-nums;font-feature-settings:"ss01"}
+.num{font-variant-numeric:tabular-nums}
+/* placard label — cockpit engraving vernacular */
+.plc{font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;font-weight:600;color:var(--txt3)}
+button{font:inherit;color:inherit;background:none;border:0}
+:focus-visible{outline:2px solid var(--cy);outline-offset:2px;border-radius:3px}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+  [class*="an-"]{opacity:1!important;transform:none!important;clip-path:none!important}
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MOTION — one orchestrated boot sequence, then micro-interactions.
+   Everything eases on the same curve so the app feels like one object.
+   ══════════════════════════════════════════════════════════════ */
+:root{--ez:cubic-bezier(.22,.85,.3,1); --ezo:cubic-bezier(.4,0,.2,1)}
+
+@keyframes riseIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
+@keyframes dropIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+@keyframes wipeIn{from{opacity:0;clip-path:inset(0 100% 0 0)}to{opacity:1;clip-path:inset(0 0 0 0)}}
+@keyframes cellPop{from{opacity:0;transform:scaleY(.25)}to{opacity:1;transform:none}}
+@keyframes pulseRed{0%,100%{box-shadow:0 0 0 0 rgba(242,85,90,.5)}50%{box-shadow:0 0 0 5px rgba(242,85,90,0)}}
+@keyframes sweep{from{transform:translateX(-110%)}to{transform:translateX(230%)}}
+
+.an-tb{animation:dropIn .42s var(--ez) both}
+.an-rail>*{animation:slideIn .4s var(--ez) both}
+.an-q{animation:dropIn .44s var(--ez) .06s both}
+.an-ec{animation:riseIn .5s var(--ez) both}
+.an-hd{animation:dropIn .4s var(--ez) .18s both}
+.an-res{animation:riseIn .46s var(--ez) both}
+.an-note{animation:riseIn .5s var(--ez) .6s both}
+.an-row{animation:wipeIn .4s var(--ezo) both}
+.an-sb{animation:dropIn .4s var(--ez) .5s both;animation-direction:reverse;animation-fill-mode:both}
+.an-sb{animation:riseIn .42s var(--ez) .5s both}
+
+/* the search field draws a scan line once on boot — an instrument coming up */
+.qin{position:relative;overflow:hidden}
+.qin::after{content:"";position:absolute;top:0;bottom:0;left:0;width:34%;pointer-events:none;
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--cy) 16%,transparent),transparent);
+  animation:sweep 1.05s var(--ezo) .38s 1 both}
+
+/* micro-interactions */
+.res{transition:background .16s var(--ezo),transform .16s var(--ezo),box-shadow .16s var(--ezo)}
+.res:hover{transform:translateX(2px)}
+.res .mb{transition:box-shadow .22s var(--ezo),background .22s var(--ezo)}
+.ri{transition:background .16s,color .16s,transform .16s var(--ez)}
+.ri:hover{transform:translateX(1.5px)}
+.ri[aria-current]::before{animation:riseIn .5s var(--ez) .3s both}
+.chip{transition:border-color .16s,color .16s,background .16s}
+.go{transition:filter .15s,transform .1s,box-shadow .15s}
+.go:active{transform:translateY(1px)}
+.tgl button{transition:background .2s var(--ezo),color .2s var(--ezo)}
+.ct tbody tr{transition:background .14s}
+.wb{transition:background .15s}
+/* theme crossfade */
+.tb,.rail,.qb,.strip,.ec,.hd,.rgt,.sb,.res,.ct td,.ct th,.notice,.chip,.tg,.qin,.acp{
+  transition-property:background-color,color,border-color,box-shadow;
+  transition-duration:.3s;transition-timing-function:var(--ezo)}
+
+/* ══ TITLE BAR ══════════════════════════════════════════════ */
+.tb{height:58px;display:flex;align-items:center;gap:14px;padding-left:14px;
+    background:linear-gradient(180deg,var(--s2),var(--s1));
+    border-bottom:1px solid var(--line);box-shadow:var(--shs);user-select:none;position:relative;z-index:5}
+.tb .mk{width:36px;height:36px;flex:none}
+.tb .nm{font-weight:650;font-size:26px;letter-spacing:.3px;line-height:1}
+.tb .nm .ai{font-style:normal;color:var(--cy);font-weight:800;letter-spacing:.3px}
+.tb .nm .si{font-style:normal;font-family:Georgia,"Times New Roman",serif;font-weight:700;padding:0 .5px}
+.tb .ct{color:var(--txt2);font-size:12px;padding-left:15px;border-left:1px solid var(--line)}
+.tb .ct b{color:var(--txt);font-weight:650}
+.sp{flex:1}
+.tgl{display:flex;align-items:center;gap:0;background:var(--well);border:1px solid var(--line);
+     border-radius:5px;padding:2px;margin-right:8px}
+.tgl button{width:30px;height:20px;border-radius:3px;display:grid;place-items:center;color:var(--txt3);
+     transition:background .18s,color .18s}
+.tgl button svg{width:13px;height:13px}
+.tgl button[aria-pressed="true"]{background:var(--s3);color:var(--cy);box-shadow:var(--shs)}
+.badge{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--txt3);
+       border:1px solid var(--line);border-radius:3px;padding:2px 8px;margin-right:8px}
+.wb{width:46px;height:58px;display:grid;place-items:center;color:var(--txt2);font-size:11px;
+    transition:background .15s}
+.wb:hover{background:var(--s3)}
+.wb.cl:hover{background:#C0272C;color:#fff}
+
+/* ══ SHELL ══════════════════════════════════════════════════ */
+.shell{display:flex;height:calc(100% - 58px - 26px)}
+
+/* rail */
+.rail{width:58px;flex:none;display:flex;flex-direction:column;align-items:center;padding-top:7px;
+      background:linear-gradient(180deg,var(--s1),var(--bg));border-right:1px solid var(--line)}
+.ri{width:44px;height:43px;display:grid;place-items:center;border-radius:6px;margin-bottom:3px;
+    color:var(--txt3);position:relative;transition:background .16s,color .16s}
+.ri svg{width:19px;height:19px}
+.ri:hover{background:var(--s2);color:var(--txt2)}
+.ri[aria-current]{color:var(--cy);background:var(--cyq)}
+.ri[aria-current]::before{content:"";position:absolute;left:-7px;top:9px;bottom:9px;width:2.5px;
+    background:var(--cyf);border-radius:0 3px 3px 0;box-shadow:0 0 9px var(--cyf)}
+.ri.dim{opacity:.32}
+.rail .gp{flex:1}
+.rail .sep{width:24px;height:1px;background:var(--line);margin:7px 0}
+
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+
+/* ══ QUERY BAND ═════════════════════════════════════════════ */
+.qb{background:linear-gradient(180deg,var(--s2),var(--s1));border-bottom:1px solid var(--line);
+    padding:11px 15px 10px;box-shadow:var(--sh);position:relative;z-index:3}
+.qtop{display:flex;gap:11px;align-items:stretch}
+/* aircraft plate — the actual airframe, not decoration */
+.acp{display:flex;align-items:center;gap:11px;background:var(--well);border:1px solid var(--line);
+     border-radius:6px;padding:5px 13px 5px 5px;flex:none;box-shadow:var(--shs)}
+.acp img{width:78px;height:40px;object-fit:cover;border-radius:4px;display:block;
+     filter:saturate(.85) contrast(1.05)}
+.acp .reg{font-family:"Cascadia Mono",Consolas,monospace;font-size:15px;font-weight:600;
+     letter-spacing:.04em;line-height:1.1}
+.acp .sub{font-size:10.5px;color:var(--txt2);margin-top:2px}
+.qcol{flex:1;display:flex;flex-direction:column;gap:8px;min-width:0}
+.qin{display:flex;align-items:center;gap:10px;background:var(--well);border:1px solid var(--line);
+     border-radius:6px;padding:0 13px;height:38px;
+     box-shadow:inset 0 1px 3px rgba(0,0,0,.16)}
+:root[data-theme="light"] .qin{box-shadow:inset 0 1px 2px rgba(20,40,60,.07)}
+.qin:focus-within{border-color:var(--cy);box-shadow:0 0 0 3px var(--cyq)}
+.qin svg{width:15px;height:15px;color:var(--txt3);flex:none}
+.qin input{flex:1;background:none;border:0;outline:0;color:var(--txt);
+     font:13.5px "Segoe UI Variable Text","Segoe UI",system-ui}
+.qin .kbd{font-size:10px;color:var(--txt3);border:1px solid var(--line);border-radius:3px;
+     padding:1px 5px;font-family:"Cascadia Mono",monospace}
+.go{background:linear-gradient(180deg,var(--cyf),color-mix(in srgb,var(--cyf) 84%,#0B2E4A));
+    color:#fff;border-radius:6px;height:38px;padding:0 20px;font-weight:650;font-size:12.5px;
+    letter-spacing:.02em;box-shadow:var(--sh),0 1px 0 rgba(255,255,255,.3) inset;flex:none}
+.go:hover{filter:brightness(1.07)}
+.qmeta{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.chip{font-size:11px;color:var(--txt2);background:var(--s3);border:1px solid var(--line);
+      border-radius:12px;padding:2.5px 10px}
+.chip b{color:var(--txt);font-weight:650}
+.chip.on{border-color:var(--cy);color:var(--cy);background:var(--cyq)}
+.chip .x{opacity:.55;margin-left:5px}
+.qstat{margin-left:auto;font-size:11px;color:var(--txt3)}
+
+/* ══ EVIDENCE STRIP ═════════════════════════════════════════ */
+.strip{display:grid;grid-template-columns:1.05fr 1.15fr 1.25fr;gap:1px;background:var(--line);
+       border-bottom:1px solid var(--line);flex:none}
+.ec{background:var(--s1);padding:11px 15px 12px;position:relative;overflow:hidden}
+.ec::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+.ec.r::before{background:var(--red)} .ec.a::before{background:var(--amb)} .ec.c::before{background:var(--cy)}
+.ech{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.ech svg{width:14px;height:14px;flex:none}
+.ec.r .ech svg{color:var(--red)} .ec.a .ech svg{color:var(--amb)} .ec.c .ech svg{color:var(--cy)}
+.ech .t{font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:700}
+.ec.r .ech .t{color:var(--red)} .ec.a .ech .t{color:var(--amb)} .ec.c .ech .t{color:var(--cy)}
+.ecm{font-size:13px;font-weight:600;line-height:1.35;color:var(--txt)}
+.ecs{font-size:11.5px;color:var(--txt2);margin-top:5px;line-height:1.45}
+.ecs b{color:var(--txt);font-weight:600}
+/* occurrence pips */
+.pips{display:flex;gap:4px;margin-top:8px;align-items:center}
+.pip{width:19px;height:5px;border-radius:2px;background:var(--red);opacity:.85}
+.pip.g{background:var(--hair);opacity:1}
+.pips .lg{font-size:10.5px;color:var(--txt3);margin-left:5px}
+/* SIGNATURE 2 — the sample IS the chart. 14 cells, 5 filled. Count n by eye. */
+.samp{display:flex;align-items:flex-end;gap:11px;margin-top:2px}
+.sv{font-family:"Cascadia Mono",Consolas,monospace;font-size:31px;font-weight:600;line-height:.9;
+    color:var(--amb);letter-spacing:-.02em}
+.scells{display:flex;gap:2.5px;padding-bottom:3px}
+.scell{width:9px;height:17px;border-radius:1.5px;background:var(--hair);border:1px solid var(--line)}
+.scell{animation:cellPop .3s var(--ez) both;transform-origin:bottom}
+.scell.f{background:var(--amb);border-color:var(--amb);box-shadow:0 0 6px -1px var(--amb)}
+.pip{animation:cellPop .3s var(--ez) both}
+.ec.r .pip:not(.g):last-of-type{animation:cellPop .3s var(--ez) both,pulseRed 2.6s var(--ezo) 1.4s infinite}
+.sn{font-size:11px;color:var(--txt2);padding-bottom:4px}
+.prov{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:10.5px;color:var(--txt3)}
+.prov .d{width:5px;height:5px;border-radius:50%;background:var(--amb);flex:none}
+
+/* ══ COLUMNS ════════════════════════════════════════════════ */
+.cols{flex:1;display:flex;min-height:0}
+.lft{flex:1.28;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--line)}
+.rgt{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--s1)}
+.hd{height:32px;display:flex;align-items:center;gap:10px;padding:0 15px;flex:none;
+    background:var(--s2);border-bottom:1px solid var(--line)}
+.hd h2{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt2);font-weight:700}
+.hd .rr{margin-left:auto;font-size:10.5px;color:var(--txt3)}
+.hd .rr b{color:var(--grn)}
+.sc{overflow-y:auto;flex:1}
+.sc::-webkit-scrollbar{width:10px}
+.sc::-webkit-scrollbar-track{background:transparent}
+.sc::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px;border:3px solid transparent;
+    background-clip:content-box}
+
+/* ── result row. Left rule = AMM revision change bar, repurposed:
+      it encodes applicability + evidence, so the rule carries meaning. ── */
+.res{display:flex;gap:0;border-bottom:1px solid var(--hair);position:relative;transition:background .14s}
+.res:hover{background:var(--s2)}
+.res .mb{width:3px;flex:none}
+.res.ok  .mb{background:var(--grn)}
+.res.unk .mb{background:repeating-linear-gradient(180deg,var(--amb) 0 4px,transparent 4px 8px)}
+.res.act .mb{background:var(--amb)}
+.res[aria-selected="true"]{background:var(--cyq)}
+.res[aria-selected="true"] .mb{background:var(--cyf);box-shadow:0 0 10px var(--cy)}
+.rw{flex:1;padding:9px 15px 10px 12px;min-width:0}
+.rk{position:absolute;right:13px;top:9px;font-size:10.5px;color:var(--txt3);font-variant-numeric:tabular-nums}
+
+/* ── SIGNATURE 1 — the ATA locator plate ── */
+.ata{display:inline-flex;align-items:baseline;font-family:"Cascadia Mono",Consolas,monospace;
+     font-size:15px;font-weight:600;letter-spacing:.01em}
+.ata i{font-style:normal}
+.ata .ch{color:var(--cy)}
+.ata .sep{color:var(--txt3);opacity:.5;margin:0 1px}
+.ata .fn{padding:0 3px;border-radius:2.5px}
+.ata .fn.diag{color:var(--cy);background:var(--cyq)}
+.ata .fn.actn{color:var(--amb);background:var(--ambq)}
+.ata .rest{color:var(--txt)}
+/* labelled plate — only on the selected row.
+   Cells are sized in `ch` of the SAME mono face as the number, so each label
+   sits exactly over its segment. */
+.plate{display:flex;margin-bottom:2px;
+  font-family:"Cascadia Mono",Consolas,monospace;font-size:15px;font-weight:600;letter-spacing:.01em}
+.plate b{display:block;font-size:7.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--txt3);text-align:center;font-weight:700;line-height:1;font-family:"Segoe UI",system-ui}
+.plate .c2{width:2ch}.plate .c3{width:3ch}.plate .cs{width:1ch}
+.rtitle{font-size:13px;color:var(--txt);margin-top:3px;font-weight:500}
+.rtags{display:flex;gap:6px;align-items:center;margin-top:7px;flex-wrap:wrap}
+.tg{font-size:10px;padding:1.5px 7px;border-radius:3px;border:1px solid var(--line);color:var(--txt2);
+    display:inline-flex;align-items:center;gap:4px;letter-spacing:.01em}
+.tg svg{width:10px;height:10px}
+.tg.man{background:var(--s3);color:var(--txt)}
+.tg.fim{color:#B992E0;border-color:#4A3A66;background:#1E1830}
+:root[data-theme="light"] .tg.fim{color:#5F3D8F;border-color:#D3C4E8;background:#F2ECFA}
+.tg.ok{color:var(--grn);border-color:var(--grn);background:var(--grnq)}
+.tg.wr{color:var(--amb);border-color:var(--amb);background:var(--ambq)}
+.tg.cat{border-style:dashed;color:var(--txt3)}
+.conf{display:flex;align-items:center;gap:7px;margin-top:8px}
+.cbar{flex:1;max-width:190px;height:4px;background:var(--hair);border-radius:2px;overflow:hidden}
+.cbar i{display:block;height:100%;border-radius:2px;
+    background:linear-gradient(90deg,color-mix(in srgb,var(--cyf) 40%,transparent),var(--cyf));
+    animation:grow .7s cubic-bezier(.2,.8,.2,1) both}
+@keyframes grow{from{width:0}}
+.cval{font-family:"Cascadia Mono",Consolas,monospace;font-size:11px;color:var(--txt2)}
+
+/* AMM-style boxed notice */
+.notice{margin:11px 15px;border:1px solid var(--amb);border-left-width:3px;border-radius:4px;
+        background:var(--ambq);padding:9px 12px;display:flex;gap:9px}
+.notice svg{width:15px;height:15px;color:var(--amb);flex:none;margin-top:1px}
+.notice .h{font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--amb)}
+.notice p{font-size:11.5px;color:var(--txt2);margin-top:3px;line-height:1.5}
+.more{padding:10px 15px;font-size:11px;color:var(--txt3)}
+.more button{color:var(--cy);font-weight:600}
+.more button:hover{text-decoration:underline}
+
+/* ── prior cases ── */
+.ct{width:100%;border-collapse:collapse;font-size:11.5px}
+.ct th{text-align:left;font-size:9px;letter-spacing:.11em;text-transform:uppercase;color:var(--txt3);
+   font-weight:700;padding:7px 11px;background:var(--s2);border-bottom:1px solid var(--line);
+   position:sticky;top:0;z-index:1}
+.ct td{padding:7.5px 11px;border-bottom:1px solid var(--hair);vertical-align:top}
+.ct td+td{border-left:1px solid var(--hair)}
+.ct tbody tr:hover td{background:var(--s2)}
+.ct tr.self td{background:var(--redq)}
+.ct tr.self:hover td{background:var(--redq);filter:brightness(1.06)}
+.tl{font-family:"Cascadia Mono",Consolas,monospace;white-space:nowrap;font-weight:600}
+.dt{color:var(--txt3);font-variant-numeric:tabular-nums;white-space:nowrap;font-size:11px}
+.rp b{font-weight:600}
+.rp .dash{color:var(--txt3)}
+.fd{color:var(--grn)}
+.fd.no{color:var(--red);font-weight:600}
+.fd.nr{color:var(--txt3);font-style:italic}
+.mini{font-size:8.5px;padding:0 4px;border-radius:2px;border:1px solid var(--red);color:var(--red);
+   margin-left:5px;vertical-align:1.5px;letter-spacing:.05em;font-family:"Segoe UI",system-ui}
+
+/* ══ STATUS ═════════════════════════════════════════════════ */
+.sb{height:26px;display:flex;align-items:center;padding:0 13px;font-size:10.5px;color:var(--txt3);
+    background:linear-gradient(180deg,var(--s1),var(--s2));border-top:1px solid var(--line)}
+.sb .i{display:flex;align-items:center;gap:7px;padding:0 13px;border-right:1px solid var(--line)}
+.sb .i:first-child{padding-left:0}
+.sb .i:last-of-type{border-right:0}
+.sb b{color:var(--txt2);font-weight:650}
+.dg{width:6px;height:6px;border-radius:50%;background:var(--grn);box-shadow:0 0 6px var(--grn)}
+.da{width:6px;height:6px;border-radius:50%;background:var(--amb);box-shadow:0 0 6px var(--amb)}
+.disc{margin-left:auto;letter-spacing:.1em;font-size:9.5px;font-weight:600;opacity:.75}
+</style>
+</head>
+<body>
+
+<!-- ═══ TITLE BAR ═══ -->
+<div class="tb an-tb">
+  <svg class="mk" viewBox="0 0 64 64"><defs><clipPath id="tbc"><circle cx="32" cy="30" r="19"/></clipPath><linearGradient id="tbs" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/></linearGradient></defs><rect x="3" y="3" width="58" height="58" rx="15" fill="var(--s1)" stroke="var(--txt)" stroke-width="2"/><circle cx="32" cy="30" r="19" fill="#FFFFFF"/><g clip-path="url(#tbc)"><rect x="13" y="11" width="38" height="19" fill="url(#tbs)"/><g fill="#4A5D6E"><rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/><rect x="12" y="26" width="11" height="2.4" rx="1.2"/><rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/><rect x="12" y="37.2" width="9" height="2.4" rx="1.2"/></g><path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51" fill="none" stroke="#2E9BE0" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></g></svg>
+  <span class="nm"><i class="ai">A<i class="si">I</i></i>vionics</span>
+  <span class="ct">B737-8 &nbsp;·&nbsp; AMM <b>Rev 48</b> &nbsp;·&nbsp; issued 2026-06-15</span>
+  <span class="sp"></span>
+  <span class="badge">Offline</span>
+  <div class="tgl" role="group" aria-label="Colour theme">
+    <button id="tl" aria-pressed="true" title="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6"/></svg></button>
+    <button id="td" aria-pressed="false" title="Dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button>
+  </div>
+  <button class="wb">&#8211;</button><button class="wb">&#9633;</button><button class="wb cl">&#10005;</button>
+</div>
+
+<div class="shell">
+
+  <!-- ═══ RAIL ═══ -->
+  <nav class="rail an-rail">
+    <button class="ri" title="Home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg></button>
+    <button class="ri" aria-current="page" title="Diagnose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
+    <button class="ri" title="Manuals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H19v18H5.5A1.5 1.5 0 0 1 4 19.5z"/><path d="M8 7h7M8 11h7"/></svg></button>
+    <button class="ri" title="Fleet"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c.9 0 1.6 1.2 1.6 2.7v4.6l8.4 4.8v2l-8.4-2.6v3.9l2.7 1.9v1.6L12 19.7 8.1 20.9v-1.6l2.7-1.9v-3.9L2.4 16.1v-2l8.4-4.8V4.7C10.4 3.2 11.1 2 12 2z"/></svg></button>
+    <button class="ri" title="Reliability"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 20h18M6 20V11M11 20V5M16 20v-6M21 20v-9"/></svg></button>
+    <button class="ri" title="Compliance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 3 6.5v5.8c0 5 3.8 8.6 9 9.7 5.2-1.1 9-4.7 9-9.7V6.5z"/><path d="m8.8 12.2 2.2 2.2 4.2-4.4"/></svg></button>
+    <button class="ri dim" title="Ops — unavailable offline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9S14.5 18.3 12 21c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg></button>
+    <span class="gp"></span><span class="sep"></span>
+    <button class="ri" title="Admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.3a2 2 0 1 1-4 0v-.2a1.6 1.6 0 0 0-2.8-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.5 14H3a2 2 0 1 1 0-4h.2a1.6 1.6 0 0 0 1.1-2.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 10 3.5V3a2 2 0 1 1 4 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7h.3a2 2 0 1 1 0 4h-.2a1.6 1.6 0 0 0-1.3 1.2z"/></svg></button>
+  </nav>
+
+  <div class="main">
+
+    <!-- ═══ QUERY ═══ -->
+    <div class="qb an-q">
+      <div class="qtop">
+        <div class="acp">
+          <img src="../../assets/photos/b737-8max.jpg" alt="Boeing 737-8 MAX">
+          <div>
+            <div class="reg">4K&#8209;AZ12</div>
+            <div class="sub">737&#8209;8 &#183; MSN 62451 &#183; ln 7644</div>
+          </div>
+        </div>
+        <div class="qcol">
+          <label class="qin">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input value="CAPT AIRSPEED UNRELIABLE ON T/O ROLL, BITE CHK SHOWS NO CURRENT FAULTS" aria-label="Symptom">
+            <span class="kbd">Ctrl K</span>
+          </label>
+          <div class="qmeta">
+            <span class="chip on">Free text &#183; no fault code <span class="x">&#10005;</span></span>
+            <span class="chip">Chapters <b>34, 22, 31</b> <span class="x">&#10005;</span></span>
+            <span class="chip">Effectivity <b>MSN 62451</b></span>
+            <span class="chip">Cases <b>1995&#8211;2026</b></span>
+            <span class="qstat num">1,204 candidates &#8594; 50 reranked &#8594; 5 shown &#183; 412 ms</span>
+          </div>
+        </div>
+        <button class="go">Search</button>
+      </div>
+    </div>
+
+    <!-- ═══ EVIDENCE STRIP ═══ -->
+    <div class="strip">
+      <div class="ec r an-ec">
+        <div class="ech">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1"><path d="M12 9v5M12 17.4v.4"/><path d="M10.3 3.9 2.5 17.4A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3.1L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+          <span class="t">Repeat defect &#183; this tail</span>
+        </div>
+        <div class="ecm">3rd occurrence in 24 days</div>
+        <div class="pips"><i class="pip"></i><i class="pip"></i><i class="pip"></i><i class="pip g"></i><i class="pip g"></i><span class="lg">14 Jul &#183; 28 Jul &#183; 07 Aug</span></div>
+        <div class="ecs">Two pitot probes already replaced on <b>4K&#8209;AZ12</b>.</div>
+      </div>
+
+      <div class="ec a an-ec">
+        <div class="ech">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 20h18M6 20v-6M11 20V9M16 20v-8M21 20v-4"/></svg>
+          <span class="t">Removal &#8594; repeat within 30 days</span>
+        </div>
+        <div class="samp">
+          <span class="sv">36%</span>
+          <span class="scells" role="img" aria-label="5 of 14 removals followed by a repeat">
+            <i class="scell f"></i><i class="scell f"></i><i class="scell f"></i><i class="scell f"></i><i class="scell f"></i>
+            <i class="scell"></i><i class="scell"></i><i class="scell"></i><i class="scell"></i><i class="scell"></i>
+            <i class="scell"></i><i class="scell"></i><i class="scell"></i><i class="scell"></i>
+          </span>
+          <span class="sn num">5 of 14<br>CI 16&#8211;61%</span>
+        </div>
+        <div class="ecs">P/N <b class="mono">0851HT&#8209;1</b> pitot probe</div>
+        <div class="prov"><span class="d"></span>SDR-mined proxy &#183; not a measured NFF rate</div>
+      </div>
+
+      <div class="ec c an-ec">
+        <div class="ech">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 16.2v-4.7M12 8.1v.3"/></svg>
+          <span class="t">Cheaper check first</span>
+        </div>
+        <div class="ecm">7 of the last 12 were resolved at the connector, not the probe</div>
+        <div class="ecs">Bonding and moisture at the pitot heater connector. About <b>20 minutes</b> &#183; <b class="mono">34&#8209;11&#8209;01&#8209;200&#8209;801</b>, item 3.</div>
+      </div>
+    </div>
+
+    <!-- ═══ COLUMNS ═══ -->
+    <div class="cols">
+
+      <div class="lft">
+        <div class="hd an-hd">
+          <h2>Task locators</h2>
+          <span class="tg">ranked</span>
+          <span class="rr">ATA 34 coverage <b>92%</b> &#183; 34-11 <b>100%</b></span>
+        </div>
+        <div class="sc">
+
+          <div class="res an-res unk" aria-selected="true">
+            <span class="mb"></span>
+            <div class="rw">
+              <div class="plate"><span class="c2"><b>ch</b></span><span class="cs"></span><span class="c2"><b>sec</b></span><span class="cs"></span><span class="c2"><b>subj</b></span><span class="cs"></span><span class="c3"><b>func</b></span><span class="cs"></span><span class="c3"><b>seq</b></span></div>
+              <div class="ata"><i class="ch">34</i><i class="sep">-</i><i class="rest">11</i><i class="sep">-</i><i class="rest">00</i><i class="sep">-</i><i class="fn diag">810</i><i class="sep">-</i><i class="rest">801</i></div>
+              <div class="rtitle">Airspeed indication &#8212; fault isolation</div>
+              <div class="rtags">
+                <span class="tg fim">FIM</span>
+                <span class="tg cat">catalogue only &#8212; no procedure held</span>
+                <span class="tg ok">&#10003; applicable</span>
+                <span class="tg">diagnostic</span>
+              </div>
+              <div class="conf"><span class="cbar"><i style="width:91%"></i></span><span class="cval">0.91</span></div>
+            </div>
+            <span class="rk">1</span>
+          </div>
+
+          <div class="res an-res ok">
+            <span class="mb"></span>
+            <div class="rw">
+              <div class="ata"><i class="ch">34</i><i class="sep">-</i><i class="rest">11</i><i class="sep">-</i><i class="rest">01</i><i class="sep">-</i><i class="fn diag">200</i><i class="sep">-</i><i class="rest">801</i></div>
+              <div class="rtitle">Pitot probe heater &#8212; inspection / check</div>
+              <div class="rtags">
+                <span class="tg man">AMM Rev 48</span>
+                <span class="tg ok">&#10003; applicable</span>
+                <span class="tg">diagnostic</span>
+                <span class="tg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 9v5M12 17.4v.4"/><path d="M10.3 3.9 2.5 17.4A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3.1L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>1 warning &#183; 2 cautions</span>
+              </div>
+              <div class="conf"><span class="cbar"><i style="width:87%"></i></span><span class="cval">0.87</span></div>
+            </div>
+            <span class="rk">2</span>
+          </div>
+
+          <div class="res an-res unk">
+            <span class="mb"></span>
+            <div class="rw">
+              <div class="ata"><i class="ch">34</i><i class="sep">-</i><i class="rest">11</i><i class="sep">-</i><i class="rest">00</i><i class="sep">-</i><i class="fn diag">710</i><i class="sep">-</i><i class="rest">801</i></div>
+              <div class="rtitle">Pitot-static system &#8212; operational test</div>
+              <div class="rtags">
+                <span class="tg man">AMM Rev 48</span>
+                <span class="tg wr">&#9888; applicability unresolved &#8212; verify in controlled data</span>
+                <span class="tg">diagnostic</span>
+              </div>
+              <div class="conf"><span class="cbar"><i style="width:84%"></i></span><span class="cval">0.84</span></div>
+            </div>
+            <span class="rk">3</span>
+          </div>
+
+          <div class="res an-res act">
+            <span class="mb"></span>
+            <div class="rw">
+              <div class="ata"><i class="ch">34</i><i class="sep">-</i><i class="rest">11</i><i class="sep">-</i><i class="rest">01</i><i class="sep">-</i><i class="fn actn">400</i><i class="sep">-</i><i class="rest">801</i></div>
+              <div class="rtitle">Pitot probe &#8212; removal / installation</div>
+              <div class="rtags">
+                <span class="tg man">AMM Rev 48</span>
+                <span class="tg ok">&#10003; applicable</span>
+                <span class="tg wr">action &#8212; removal</span>
+                <span class="tg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 9v5M12 17.4v.4"/><path d="M10.3 3.9 2.5 17.4A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3.1L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>2 warnings &#183; 1 caution</span>
+              </div>
+              <div class="conf"><span class="cbar"><i style="width:79%"></i></span><span class="cval">0.79</span></div>
+            </div>
+            <span class="rk">4</span>
+          </div>
+
+          <div class="res an-res act">
+            <span class="mb"></span>
+            <div class="rw">
+              <div class="ata"><i class="ch">34</i><i class="sep">-</i><i class="rest">11</i><i class="sep">-</i><i class="rest">02</i><i class="sep">-</i><i class="fn actn">000</i><i class="sep">-</i><i class="rest">801</i></div>
+              <div class="rtitle">Static port &#8212; cleaning</div>
+              <div class="rtags">
+                <span class="tg man">AMM Rev 48</span>
+                <span class="tg ok">&#10003; applicable</span>
+                <span class="tg">action &#8212; servicing</span>
+              </div>
+              <div class="conf"><span class="cbar"><i style="width:71%"></i></span><span class="cval">0.71</span></div>
+            </div>
+            <span class="rk">5</span>
+          </div>
+
+          <div class="notice an-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1"><path d="M12 9v5M12 17.4v.4"/><path d="M10.3 3.9 2.5 17.4A2 2 0 0 0 4.2 20.5h15.6a2 2 0 0 0 1.7-3.1L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            <div>
+              <div class="h">No wiring manual held for this type</div>
+              <p>Every task above ends at a line-replaceable unit, which means it ends at a removal. Interconnect faults &#8212; wiring, connectors, bonding, moisture &#8212; cannot be resolved from the data in this index.</p>
+            </div>
+          </div>
+
+          <div class="more">45 further candidates fell below the confidence threshold for ATA 34. <button>Show all</button></div>
+        </div>
+      </div>
+
+      <div class="rgt">
+        <div class="hd an-hd">
+          <h2>Prior cases</h2>
+          <span class="rr"><span class="num">14</span> matched &#183; this tail first</span>
+        </div>
+        <div class="sc">
+          <table class="ct">
+            <thead><tr><th>Tail</th><th>Date</th><th>Replaced</th><th>Found</th></tr></thead>
+            <tbody>
+              <tr class="self an-row"><td class="tl">4K-AZ12<span class="mini">THIS</span></td><td class="dt">28 Jul 26</td><td class="rp"><b>Pitot probe</b> L</td><td class="fd no">No fault found</td></tr>
+              <tr class="self an-row"><td class="tl">4K-AZ12<span class="mini">THIS</span></td><td class="dt">14 Jul 26</td><td class="rp"><b>Pitot probe</b> L</td><td class="fd nr">Not recorded</td></tr>
+              <tr class="an-row"><td class="tl">N8942L</td><td class="dt">03 Jun 26</td><td class="rp"><span class="dash">&#8212;</span></td><td class="fd">Chafed harness at connector D2418</td></tr>
+              <tr class="an-row"><td class="tl">N17294</td><td class="dt">19 May 26</td><td class="rp"><b>ADIRU 1</b></td><td class="fd no">No fault found</td></tr>
+              <tr class="an-row"><td class="tl">PH-EXK</td><td class="dt">02 May 26</td><td class="rp"><span class="dash">&#8212;</span></td><td class="fd">Moisture in static line, drained</td></tr>
+              <tr class="an-row"><td class="tl">N8676A</td><td class="dt">11 Apr 26</td><td class="rp"><b>Pitot probe</b> L</td><td class="fd">Heater element open circuit</td></tr>
+              <tr class="an-row"><td class="tl">VT-IUD</td><td class="dt">27 Mar 26</td><td class="rp"><span class="dash">&#8212;</span></td><td class="fd">Corroded bonding strap, cleaned</td></tr>
+              <tr class="an-row"><td class="tl">C-FEKS</td><td class="dt">14 Mar 26</td><td class="rp"><b>Air data module</b></td><td class="fd nr">Not recorded</td></tr>
+              <tr class="an-row"><td class="tl">SE-RSC</td><td class="dt">28 Feb 26</td><td class="rp"><span class="dash">&#8212;</span></td><td class="fd">Water ingress at probe drain hole</td></tr>
+              <tr class="an-row"><td class="tl">N27908</td><td class="dt">09 Feb 26</td><td class="rp"><b>Pitot probe</b> R</td><td class="fd no">No fault found</td></tr>
+              <tr class="an-row"><td class="tl">HB-JHF</td><td class="dt">21 Jan 26</td><td class="rp"><span class="dash">&#8212;</span></td><td class="fd">Loose pin, connector D2418</td></tr>
+              <tr class="an-row"><td class="tl">G-LMTH</td><td class="dt">04 Jan 26</td><td class="rp"><b>Pitot probe</b> L</td><td class="fd no">No fault found</td></tr>
+            </tbody>
+          </table>
+          <div class="more">6 further cases are hidden because closure is incomplete and no finding was recorded. They are excluded from the statistics above. <button>Show them</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ STATUS ═══ -->
+<div class="sb an-sb">
+  <span class="i"><span class="dg"></span>Index <b>v14</b> &#183; bge-small &#183; 851 AMM + 3,674 FIM</span>
+  <span class="i"><span class="da"></span>FIM catalogue only &#8212; no procedures</span>
+  <span class="i">Cases <b class="num">120,271</b> &#183; SDR 1995&#8211;2026</span>
+  <span class="i">Signed in <b>S. Asadli</b> &#183; Reliability</span>
+  <span class="disc">DECISION SUPPORT &#8212; NOT PART OF THE MAINTENANCE RECORD</span>
+</div>
+
+<script>
+/* ── theme ── */
+const R=document.documentElement,L=document.getElementById('tl'),D=document.getElementById('td');
+function set(t){R.dataset.theme=t;L.setAttribute('aria-pressed',t==='light');
+  D.setAttribute('aria-pressed',t==='dark');try{localStorage.setItem('aiv-theme',t)}catch(e){}}
+L.onclick=()=>set('light');D.onclick=()=>set('dark');
+try{const s=localStorage.getItem('aiv-theme');if(s)set(s)}catch(e){}
+
+/* ── boot sequence: stagger in reading order, one cascade ── */
+const D_=(el,ms)=>el&&el.style.setProperty('animation-delay',ms+'ms');
+document.querySelectorAll('.rail>*').forEach((el,i)=>D_(el,120+i*32));
+document.querySelectorAll('.ec').forEach((el,i)=>D_(el,300+i*90));
+document.querySelectorAll('.res').forEach((el,i)=>D_(el,470+i*70));
+document.querySelectorAll('.ct tbody tr').forEach((el,i)=>D_(el,560+i*34));
+document.querySelectorAll('.cbar i').forEach((el,i)=>D_(el,640+i*70));
+document.querySelectorAll('.scell').forEach((el,i)=>D_(el,540+i*26));
+document.querySelectorAll('.pip').forEach((el,i)=>D_(el,420+i*70));
+
+/* ── selection ── */
+document.querySelectorAll('.res').forEach(r=>r.onclick=()=>{
+  document.querySelectorAll('.res').forEach(x=>{x.removeAttribute('aria-selected');
+    const p=x.querySelector('.plate'); if(p) p.remove();});
+  r.setAttribute('aria-selected','true');
+  if(!r.querySelector('.plate')){
+    const p=document.createElement('div');p.className='plate';
+    p.innerHTML='<span class=\"c2\"><b>ch</b></span><span class=\"cs\"></span><span class=\"c2\"><b>sec</b></span><span class=\"cs\"></span><span class=\"c2\"><b>subj</b></span><span class=\"cs\"></span><span class=\"c3\"><b>func</b></span><span class=\"cs\"></span><span class=\"c3\"><b>seq</b></span>';
+    r.querySelector('.rw').prepend(p);
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Top-view aircraft marker for the fleet map (Phase 4B.4).
+       Nose points to 0deg (north). Rotate about 16,16 by the ADS-B true track.
+       Single path, no strokes, so it stays legible at 16px.
+       Authored for this project - no third-party licence. -->
+  <path fill="currentColor" d="
+    M16 2
+    c1.15 0 2.05 1.6 2.05 3.6
+    v6.05
+    l11.1 6.35
+    v2.6
+    l-11.1 -3.4
+    v5.15
+    l3.6 2.5
+    v2.05
+    l-5.65 -1.5
+    l-5.65 1.5
+    v-2.05
+    l3.6 -2.5
+    v-5.15
+    l-11.1 3.4
+    v-2.6
+    l11.1 -6.35
+    v-6.05
+    C13.95 3.6 14.85 2 16 2 z"/>
+</svg>

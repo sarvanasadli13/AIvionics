@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 64" width="300" height="64" role="img" aria-label="AIvionics">
+  <!-- AIvionics horizontal lockup — DARK.
+       Identical geometry and identical blues to logo-light.svg; only the tile
+       and the "vionics" neutral invert. Convert text to outlines before final
+       export. -->
+  <title>AIvionics</title>
+  <defs>
+    <clipPath id="lgd"><circle cx="32" cy="30" r="19"/></clipPath>
+    <linearGradient id="sD" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="#0F1C29" stroke="#7FB6DC" stroke-width="2"/>
+  <circle cx="32" cy="30" r="19" fill="#FFFFFF"/>
+  <g clip-path="url(#lgd)">
+    <rect x="13" y="11" width="38" height="19" fill="url(#sD)"/>
+    <g fill="#5A6B7C">
+      <rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/>
+      <rect x="12" y="26.0" width="11" height="2.4" rx="1.2"/>
+      <rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/>
+      <rect x="12" y="37.2" width="9"  height="2.4" rx="1.2"/>
+    </g>
+    <path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51"
+          fill="none" stroke="#2E9BE0" stroke-width="2.6"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text y="41" font-size="28" letter-spacing="-.3"
+        font-family="Segoe UI Variable Display, Segoe UI, system-ui, sans-serif">
+    <tspan x="74" fill="#5BB4F0" font-weight="800">A</tspan><!--
+ --><tspan fill="#5BB4F0" font-weight="700" font-family="Georgia, 'Times New Roman', serif">I</tspan><!--
+ --><tspan fill="#FFFFFF" font-weight="600">vionics</tspan>
+  </text>
+</svg>

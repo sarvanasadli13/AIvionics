@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>AIvionics — logo</title>
+<style>
+:root{--ink:#0F1F2C;--dim:#5A7186;--line:#CBE0F0}
+*{box-sizing:border-box}
+body{margin:0;font:14px "Segoe UI Variable Text","Segoe UI",system-ui;background:#EAF2F9;color:var(--ink)}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 34px 56px}
+h1{font-size:20px;margin:0 0 4px;font-weight:700}
+.sub{color:var(--dim);font-size:12.5px;margin-bottom:8px}
+h2{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+   margin:30px 0 12px;font-weight:700;border-top:1px solid var(--line);padding-top:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pane{border-radius:12px;padding:24px;border:1px solid var(--line)}
+.pane.L{background:#fff}
+.pane.D{background:#08131E;border-color:#22394E;color:#DCE9F5}
+.tag{font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;opacity:.5;margin-bottom:18px}
+.sizes{display:flex;align-items:flex-end;gap:26px;margin-top:6px}
+.sizes figure{margin:0;text-align:center}
+.sizes figcaption{font-size:9.5px;opacity:.45;margin-top:9px;font-variant-numeric:tabular-nums}
+.tbm{display:flex;align-items:center;gap:9px;border-radius:6px;padding:9px 13px;font-size:13px;font-weight:650;margin-top:20px}
+.L .tbm{background:#F6FAFD;border:1px solid var(--line)}
+.D .tbm{background:#152435;border:1px solid #22394E}
+.L .ai{color:#0E74BC}.D .ai{color:#5BB4F0}
+.ai{font-weight:800;font-style:normal}
+.si{font-family:Georgia,"Times New Roman",serif;font-weight:700;font-style:normal;padding:0 .5px}
+.note{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px 24px;
+      font-size:12.5px;color:var(--dim);line-height:1.6}
+.note b{color:var(--ink)}
+.mono{background:#EAF2F9;padding:1px 6px;border-radius:3px;font-family:Consolas,monospace;font-size:11.5px;color:#0E74BC}
+</style></head><body><div class="wrap">
+
+<h1><span class="ai" style="color:#0E74BC">A<span class="si">I</span></span>vionics — logo</h1>
+<div class="sub">Final. Concept B, accent + serifed capital I.</div>
+
+<h2>Lockup</h2>
+<div class="grid">
+  <div class="pane L"><div class="tag">Light</div>
+    <img src="../../assets/icons/logo-light.svg" width="300" height="64" alt=""></div>
+  <div class="pane D"><div class="tag">Dark</div>
+    <img src="../../assets/icons/logo-dark.svg" width="300" height="64" alt=""></div>
+</div>
+
+<h2>Mark at real sizes</h2>
+<div class="grid">
+  <div class="pane L"><div class="tag">Light</div>
+    <div class="sizes">
+      <figure><img src="../../assets/icons/mark-light.svg" width="128" height="128" alt=""><figcaption>128</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-light.svg" width="64" height="64" alt=""><figcaption>64</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-light.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-light.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-light.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure>
+    </div>
+    <div class="tbm"><img src="../../assets/icons/mark-light.svg" width="18" height="18" alt="">
+      <span><i class="ai">A<i class="si">I</i></i>vionics</span></div>
+  </div>
+  <div class="pane D"><div class="tag">Dark</div>
+    <div class="sizes">
+      <figure><img src="../../assets/icons/mark-dark.svg" width="128" height="128" alt=""><figcaption>128</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-dark.svg" width="64" height="64" alt=""><figcaption>64</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-dark.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-dark.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure>
+      <figure><img src="../../assets/icons/mark-dark.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure>
+    </div>
+    <div class="tbm"><img src="../../assets/icons/mark-dark.svg" width="18" height="18" alt="">
+      <span><i class="ai">A<i class="si">I</i></i>vionics</span></div>
+  </div>
+</div>
+
+<h2>Rules</h2>
+<div class="note">
+  <b>The capital I is always serif.</b> In Segoe UI a capital <span class="mono">I</span> and a lowercase
+  <span class="mono">l</span> are the same glyph, so “AIvionics” reads as “Alvionics” and the AI disappears.
+  The serif crossbars fix it permanently — including in one-colour print, engraving and fax, where the
+  accent colour is gone.<br><br>
+  <b>Never set the name inside the tile.</b> At 32 px it is a smear and at 16 px it is noise; those are the
+  sizes the icon lives at. Windows prints the app name beside the icon anyway.<br><br>
+  <b>The blues never change between modes.</b> Sky <span class="mono">#8FCBEC → #CFE7F6</span> and trace
+  <span class="mono">#2E9BE0</span> are identical in light and dark — only the tile and the “vionics”
+  neutral invert. That is what makes them one logo instead of two.<br><br>
+  <b>In the app the mark is inline SVG</b> using <span class="mono">var(--s1)</span> and
+  <span class="mono">var(--txt)</span>, so it follows the theme toggle with no second file.<br><br>
+  <b>Convert text to outlines before any final export.</b> The lockups use live text and will re-flow on a
+  machine without Segoe UI Variable or Georgia.
+</div>
+
+</div></body></html>

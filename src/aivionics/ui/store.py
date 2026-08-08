@@ -128,7 +128,7 @@ class CorpusReader:
     def manuals(self, aircraft_type: str | None = None,
                 manual_type: str | None = None) -> list[dict]:
         sql = ("SELECT id, oem, aircraft_type, manual_type, revision, revision_date, "
-               "is_current FROM manual")
+               "is_current, source_file FROM manual")
         where, args = [], []
         if aircraft_type:
             where.append("aircraft_type=?")
@@ -140,7 +140,7 @@ class CorpusReader:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY aircraft_type, manual_type, is_current DESC, revision DESC"
         keys = ("id", "oem", "aircraft_type", "manual_type", "revision",
-                "revision_date", "is_current")
+                "revision_date", "is_current", "source_file")
         return [dict(zip(keys, r)) for r in _safe(self.con, sql, tuple(args))]
 
     def chapters(self, manual_id: int) -> list[dict]:

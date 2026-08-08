@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="AIvionics">
+  <!-- AIvionics mark — CONCEPT B, LIGHT TILE.
+       Identical geometry to mark-b-dark.svg. The tile and linework invert;
+       the sky blue and the trace blue stay the same values, so the two read
+       as one logo. -->
+  <title>AIvionics</title>
+  <defs>
+    <clipPath id="bl"><circle cx="32" cy="30" r="19"/></clipPath>
+    <linearGradient id="skyL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="#FFFFFF" stroke="#0F2C42" stroke-width="2"/>
+  <circle cx="32" cy="30" r="19" fill="#FFFFFF" stroke="#0F2C42" stroke-width="1.6"/>
+  <g clip-path="url(#bl)">
+    <rect x="13" y="11" width="38" height="19" fill="url(#skyL)"/>
+    <g fill="#4A5D6E">
+      <rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/>
+      <rect x="12" y="26.0" width="11" height="2.4" rx="1.2"/>
+      <rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/>
+      <rect x="12" y="37.2" width="9"  height="2.4" rx="1.2"/>
+    </g>
+    <path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51"
+          fill="none" stroke="#2E9BE0" stroke-width="2.6"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

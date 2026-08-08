@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 64" width="300" height="64" role="img" aria-label="AIvionics">
+  <!-- AIvionics horizontal lockup — LIGHT.
+       Mark: rounded tile, circular dial, sky above, index tabs, diagnostic trace.
+       Wordmark: "AI" in the accent AND the capital I set in a serif face.
+       Both are load-bearing — the colour carries it in normal use, the serif
+       crossbars guarantee it can never be read as a lowercase "l" when the
+       logo is printed in one colour, engraved, or faxed.
+       NOTE: live text, so it stays editable. Convert to outlines before final
+       export or it re-flows without Segoe UI Variable / Georgia. -->
+  <title>AIvionics</title>
+  <defs>
+    <clipPath id="lgl"><circle cx="32" cy="30" r="19"/></clipPath>
+    <linearGradient id="sL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="#FFFFFF" stroke="#0F2C42" stroke-width="2"/>
+  <circle cx="32" cy="30" r="19" fill="#FFFFFF" stroke="#0F2C42" stroke-width="1.6"/>
+  <g clip-path="url(#lgl)">
+    <rect x="13" y="11" width="38" height="19" fill="url(#sL)"/>
+    <g fill="#4A5D6E">
+      <rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/>
+      <rect x="12" y="26.0" width="11" height="2.4" rx="1.2"/>
+      <rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/>
+      <rect x="12" y="37.2" width="9"  height="2.4" rx="1.2"/>
+    </g>
+    <path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51"
+          fill="none" stroke="#2E9BE0" stroke-width="2.6"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text y="41" font-size="28" letter-spacing="-.3"
+        font-family="Segoe UI Variable Display, Segoe UI, system-ui, sans-serif">
+    <tspan x="74" fill="#0E74BC" font-weight="800">A</tspan><!--
+ --><tspan fill="#0E74BC" font-weight="700" font-family="Georgia, 'Times New Roman', serif">I</tspan><!--
+ --><tspan fill="#0F2C42" font-weight="600">vionics</tspan>
+  </text>
+</svg>

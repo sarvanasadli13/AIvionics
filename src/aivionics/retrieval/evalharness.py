@@ -22,6 +22,16 @@ Two correctness definitions are reported side by side and never merged:
 Baselines that must be beaten (PLAN §5): stratified top-20 frequency per ATA
 chapter, FTS5 alone, vector alone, and hybrid without a reranker.
 
+**Coverage is reported separately from quality, and both are mandatory.** The
+product covers the whole ATA range, but the corpus does not: most silver labels
+point at a chapter with no readable AMM. A single pooled number would therefore
+mostly measure the corpus hole, while a number computed only over covered
+chapters would read far better than the product actually performs. So every run
+reports three pools — ALL pairs (the headline), SERVABLE chapters only, and
+UNSERVABLE chapters only — plus a per-chapter breakdown. The unservable pool
+should sit at ~0 by construction; if it does not, something is matching a task
+that is not in the corpus and that is a finding, not a win.
+
 **These are silver labels.** They record what an engineer cited, not what was
 correct. Everything here measures agreement with that, and the gold set (§5) is
 what turns agreement into correctness.
@@ -37,6 +47,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
+from ..parsers.ata import chapter_name
 from .search import SearchResult, SearchRun, Searcher
 
 DEFAULT_THRESHOLD = 0.35
@@ -48,6 +59,19 @@ class EvalQuery:
     query: str
     jasc: str | None
     gold: tuple[str, ...]
+
+    @property
+    def gold_chapters(self) -> tuple[str, ...]:
+        """Chapters of the labelled tasks — where the answer would have to live.
+        Deliberately not the JASC hint: the hint is what the reporter typed and
+        is miscoded at chapter boundaries, whereas coverage is a fact about the
+        corpus and the label."""
+        seen = []
+        for task_number in self.gold:
+            ch = chapter_of(task_number)
+            if ch and ch not in seen:
+                seen.append(ch)
+        return tuple(seen)
 
 
 SearchFn = Callable[[EvalQuery], SearchRun]
@@ -117,12 +141,60 @@ def _pct(values: Sequence[float], q: float) -> float:
     return float(np.percentile(values, q)) if len(values) else 0.0
 
 
+# ── corpus coverage ──────────────────────────────────────────────────────
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def chapter_of(task_number: str | None) -> str | None:
+    """ATA chapter from a task number, tolerating the engine-prefix form
+    (G73-00-00-810-A73) and the six-group form (71-00-00-800-801-G00)."""
+    if not task_number:
+        return None
+    head = task_number.strip().upper().split("-")[0].lstrip(_LETTERS)
+    return head[:2] if head[:2].isdigit() else None
+
+
+def servable_chapters(con: sqlite3.Connection) -> set[str]:
+    """Chapters holding at least one task row — AMM body or FIM catalogue alike.
+
+    A chapter outside this set cannot be answered at all: nothing is indexed to
+    return, so its recall is zero *by construction*, not by retrieval failure.
+    Pooling those pairs into a headline number measures the corpus hole rather
+    than the engine, which is why the pools below are reported separately.
+    """
+    return {row[0] for row in con.execute(
+        "SELECT DISTINCT ata_chapter FROM task WHERE ata_chapter IS NOT NULL")
+        if row[0]}
+
+
 # ── scoring one run ──────────────────────────────────────────────────────
+@dataclass
+class QueryOutcome:
+    """One query's result kept per-query, so the aggregate can be re-sliced by
+    ATA chapter and by coverage without re-running any search."""
+    defect_id: int
+    chapter: str | None          # primary gold chapter — where the answer lives
+    chapters: tuple[str, ...]
+    servable: bool               # any gold chapter has task rows in the corpus
+    top1_score: float
+    modes: dict
+
+
 def _mode_metrics(run: SearchRun, q: EvalQuery, key_fn, k_hit: int, k_recall: int) -> dict:
     gold = {key_fn(t) for t in q.gold} - {None}
     stage1 = [key_fn(r.task_number) for r in run.ranked]
     final = [key_fn(r.task_number) for r in run.results]
-    hits = [t in gold for t in final[:k_hit]]
+
+    # Each gold item counts once, at its best rank. Under the relaxed key,
+    # sibling task numbers (-801 and -802) collapse to the same key, so without
+    # this a single gold item scores twice and NDCG exceeds 1.
+    hits, credited = [], set()
+    for key in final[:k_hit]:
+        is_new_hit = key in gold and key not in credited
+        if is_new_hit:
+            credited.add(key)
+        hits.append(is_new_hit)
+
     return {
         "stage1_hit": bool(gold & set(stage1)),
         "recall_at_k": bool(gold & set(stage1[:k_recall])),
@@ -132,46 +204,16 @@ def _mode_metrics(run: SearchRun, q: EvalQuery, key_fn, k_hit: int, k_recall: in
     }
 
 
-def evaluate(
-    con_or_none,
-    search_fn: SearchFn,
-    name: str,
-    queries: Sequence[EvalQuery],
-    threshold: float = DEFAULT_THRESHOLD,
-    k_hit: int = 5,
-    k_recall: int = 50,
-) -> dict:
-    """Run ``search_fn`` over every query and aggregate. ``con_or_none`` is
-    accepted so the signature matches the 'connection + search function' contract
-    even when the search function already closes over its own connection."""
-    per_mode = {m: {"stage1": [], "recall": [], "hit": [], "ndcg": [], "top1": []}
-                for m in KEYS}
-    top1_scores: list[float] = []
-    wrong_scores = {m: [] for m in KEYS}
-
-    for q in queries:
-        run = search_fn(q)
-        score = float(run.results[0].score) if run.results else 0.0
-        top1_scores.append(score)
-        for mode, key_fn in KEYS.items():
-            m = _mode_metrics(run, q, key_fn, k_hit, k_recall)
-            per_mode[mode]["stage1"].append(m["stage1_hit"])
-            per_mode[mode]["recall"].append(m["recall_at_k"])
-            per_mode[mode]["hit"].append(m["hit_at_k"])
-            per_mode[mode]["ndcg"].append(m["ndcg_at_k"])
-            per_mode[mode]["top1"].append(m["top1_correct"])
-            if not m["top1_correct"]:
-                wrong_scores[mode].append(score)
-
-    n = len(queries)
+def _aggregate(outcomes: Sequence[QueryOutcome], threshold: float,
+               k_hit: int, k_recall: int) -> dict:
+    """The metric block, over whatever subset of outcomes it is handed.
+    Identical arithmetic for the headline, a chapter and a pool alike."""
+    n = len(outcomes)
+    top1_scores = [o.top1_score for o in outcomes]
     mean = lambda xs: float(np.mean(xs)) if xs else 0.0  # noqa: E731
 
-    report = {
-        "name": name,
+    block = {
         "n_queries": n,
-        "threshold": threshold,
-        "k_hit": k_hit,
-        "k_recall": k_recall,
         "abstention_rate": mean([s < threshold for s in top1_scores]),
         "top1_score": {
             "mean": mean(top1_scores),
@@ -182,14 +224,14 @@ def evaluate(
         },
     }
     for mode in KEYS:
-        d = per_mode[mode]
-        ws = wrong_scores[mode]
-        report[mode] = {
-            "stage1_recall": mean(d["stage1"]),
-            f"recall_at_{k_recall}": mean(d["recall"]),
-            f"hit_at_{k_hit}": mean(d["hit"]),
-            f"ndcg_at_{k_hit}": mean(d["ndcg"]),
-            "top1_accuracy": mean(d["top1"]),
+        vals = [o.modes[mode] for o in outcomes]
+        ws = [o.top1_score for o in outcomes if not o.modes[mode]["top1_correct"]]
+        block[mode] = {
+            "stage1_recall": mean([v["stage1_hit"] for v in vals]),
+            f"recall_at_{k_recall}": mean([v["recall_at_k"] for v in vals]),
+            f"hit_at_{k_hit}": mean([v["hit_at_k"] for v in vals]),
+            f"ndcg_at_{k_hit}": mean([v["ndcg_at_k"] for v in vals]),
+            "top1_accuracy": mean([v["top1_correct"] for v in vals]),
             "confident_wrong": {
                 "n_wrong": len(ws),
                 "rate_of_all": (len(ws) / n) if n else 0.0,
@@ -203,7 +245,90 @@ def evaluate(
                     sum(1 for s in ws if s >= threshold) / n) if n else 0.0,
             },
         }
-    return report
+    return block
+
+
+POOL_LABELS = {
+    "all": "ALL pairs — THE HEADLINE. Quote this number.",
+    "servable": "SERVABLE chapters only — NOT the headline. Excludes every pair "
+                "whose chapter has no corpus, so it answers 'how well does "
+                "retrieval work where a corpus exists', nothing broader.",
+    "unservable": "UNSERVABLE chapters only — expected ~0 by construction "
+                  "(nothing indexed to retrieve). Anything above 0 is a finding.",
+}
+
+
+def _pools(outcomes: Sequence[QueryOutcome], threshold: float,
+           k_hit: int, k_recall: int) -> list[dict]:
+    subsets = {
+        "all": list(outcomes),
+        "servable": [o for o in outcomes if o.servable],
+        "unservable": [o for o in outcomes if not o.servable],
+    }
+    return [
+        {"pool": key, "label": POOL_LABELS[key],
+         **_aggregate(subset, threshold, k_hit, k_recall)}
+        for key, subset in subsets.items()
+    ]
+
+
+def _by_chapter(outcomes: Sequence[QueryOutcome], servable: set[str],
+                threshold: float, k_hit: int, k_recall: int) -> list[dict]:
+    groups: dict[str, list[QueryOutcome]] = {}
+    for o in outcomes:
+        groups.setdefault(o.chapter or "??", []).append(o)
+    rows = [
+        {"ata_chapter": chapter,
+         "chapter_name": chapter_name(chapter) if chapter.isdigit() else "unknown",
+         "servable": chapter in servable,
+         **_aggregate(items, threshold, k_hit, k_recall)}
+        for chapter, items in groups.items()
+    ]
+    rows.sort(key=lambda r: (-r["n_queries"], r["ata_chapter"]))
+    return rows
+
+
+def evaluate(
+    con_or_none,
+    search_fn: SearchFn,
+    name: str,
+    queries: Sequence[EvalQuery],
+    threshold: float = DEFAULT_THRESHOLD,
+    k_hit: int = 5,
+    k_recall: int = 50,
+    servable: set[str] | None = None,
+) -> dict:
+    """Run ``search_fn`` over every query and aggregate. ``con_or_none`` is
+    accepted so the signature matches the 'connection + search function' contract
+    even when the search function already closes over its own connection; it is
+    also where the servable-chapter set is read from when not supplied."""
+    if servable is None and con_or_none is not None:
+        servable = servable_chapters(con_or_none)
+    servable = servable or set()
+
+    outcomes: list[QueryOutcome] = []
+    for q in queries:
+        run = search_fn(q)
+        chapters = q.gold_chapters
+        outcomes.append(QueryOutcome(
+            defect_id=q.defect_id,
+            chapter=chapters[0] if chapters else None,
+            chapters=chapters,
+            servable=any(c in servable for c in chapters),
+            top1_score=float(run.results[0].score) if run.results else 0.0,
+            modes={mode: _mode_metrics(run, q, key_fn, k_hit, k_recall)
+                   for mode, key_fn in KEYS.items()},
+        ))
+
+    return {
+        "name": name,
+        "threshold": threshold,
+        "k_hit": k_hit,
+        "k_recall": k_recall,
+        **_aggregate(outcomes, threshold, k_hit, k_recall),
+        "pools": _pools(outcomes, threshold, k_hit, k_recall),
+        "by_chapter": _by_chapter(outcomes, servable, threshold, k_hit, k_recall),
+    }
 
 
 # ── search functions under test ──────────────────────────────────────────
@@ -311,21 +436,21 @@ def run_all(
     if queries is None:
         queries = load_eval_queries(con, split=split, limit=limit)
 
+    servable = servable_chapters(con)
+    ev = lambda fn, name: evaluate(  # noqa: E731
+        con, fn, name, queries, threshold, servable=servable)
+
     runs = [
-        evaluate(con, frequency_fn(con), "baseline: top-20 frequency/ATA",
-                 queries, threshold),
-        evaluate(con, channel_fn(searcher, "fts", top_k), "baseline: FTS5 alone",
-                 queries, threshold),
-        evaluate(con, channel_fn(searcher, "dense", top_k), "baseline: vector alone",
-                 queries, threshold),
-        evaluate(con, hybrid_fn(searcher, rerank=False, top_k=top_k),
-                 "hybrid, no rerank", queries, threshold),
+        ev(frequency_fn(con), "baseline: top-20 frequency/ATA"),
+        ev(channel_fn(searcher, "fts", top_k), "baseline: FTS5 alone"),
+        ev(channel_fn(searcher, "dense", top_k), "baseline: vector alone"),
+        ev(hybrid_fn(searcher, rerank=False, top_k=top_k), "hybrid, no rerank"),
     ]
     rerank_stats = None
     if include_rerank and searcher.reranker is not None:
         label = getattr(searcher.reranker, "name", "reranker")
-        runs.append(evaluate(con, hybrid_fn(searcher, rerank=True, top_k=top_k),
-                             f"hybrid + {label} rerank", queries, threshold))
+        runs.append(ev(hybrid_fn(searcher, rerank=True, top_k=top_k),
+                       f"hybrid + {label} rerank"))
         # a reranker that fell back on every query produces numbers identical to
         # the un-reranked run — report the count so that is never mistaken for
         # "the reranker made no difference"
@@ -333,19 +458,91 @@ def run_all(
         if stats is not None:
             rerank_stats = dict(stats)
 
+    pool_n = {p["pool"]: p["n_queries"] for p in runs[0]["pools"]} if runs else {}
+    n = len(queries)
     return {
         "index_version": searcher.index_version,
         "model": searcher.embedder.model_name,
         "split": split,
-        "n_queries": len(queries),
+        "n_queries": n,
         "threshold": threshold,
         "labels": "silver — measures agreement with cited tasks, not correctness",
+        "coverage": {
+            "servable_chapters": sorted(servable),
+            "n_servable_chapters": len(servable),
+            "n_pairs_servable": pool_n.get("servable", 0),
+            "n_pairs_unservable": pool_n.get("unservable", 0),
+            "pct_pairs_servable": (100.0 * pool_n.get("servable", 0) / n) if n else 0.0,
+            "note": "a pair is servable when the chapter of its labelled task "
+                    "holds at least one task row; unservable pairs are "
+                    "unanswerable by construction, not by retrieval failure",
+        },
         "reranker_stats": rerank_stats,
         "runs": runs,
     }
 
 
 # ── output ───────────────────────────────────────────────────────────────
+def _pools_section(report: dict, k_hit: int, k_rec: int) -> list[str]:
+    """Every run against all three coverage pools. The headline is ALL pairs;
+    the servable row exists so the coverage hole can be separated from retrieval
+    quality, never so it can be quoted in the hole's place."""
+    if not report["runs"] or "pools" not in report["runs"][0]:
+        return []
+    header = (f"{'run':<34}{'pool':<12}{'n':>6}"
+              f"{'R@'+str(k_rec):>8}{'Hit@'+str(k_hit):>8}{'NDCG@'+str(k_hit):>9}"
+              f"{'R@'+str(k_rec):>8}{'Hit@'+str(k_hit):>8}{'NDCG@'+str(k_hit):>9}")
+    lines = ["", "── coverage pools " + "─" * 60,
+             f"{'':<52}{'——— strict ———':>25}{'——— relaxed ———':>25}",
+             header, "-" * len(header)]
+    for run in report["runs"]:
+        for pool in run["pools"]:
+            s, r = pool["strict"], pool["relaxed"]
+            lines.append(
+                f"{run['name']:<34}{pool['pool']:<12}{pool['n_queries']:>6}"
+                f"{s[f'recall_at_{k_rec}']:>8.3f}{s[f'hit_at_{k_hit}']:>8.3f}"
+                f"{s[f'ndcg_at_{k_hit}']:>9.3f}"
+                f"{r[f'recall_at_{k_rec}']:>8.3f}{r[f'hit_at_{k_hit}']:>8.3f}"
+                f"{r[f'ndcg_at_{k_hit}']:>9.3f}")
+        lines.append("")
+    for pool in report["runs"][0]["pools"]:
+        lines.append(f"  {pool['pool']:<12} {pool['label']}")
+    return lines
+
+
+def _chapter_section(report: dict, k_hit: int, k_rec: int) -> list[str]:
+    """Per-chapter breakdown for the final (best-configured) run. Every run's
+    breakdown is in the JSON; printing all of them would bury the table."""
+    runs = [r for r in report["runs"] if r.get("by_chapter")]
+    if not runs:
+        return []
+    run = runs[-1]
+    header = (f"{'ch':<4}{'chapter':<34}{'n':>6}{'srv':>5}"
+              f"{'stage1':>8}{'R@'+str(k_rec):>8}{'Hit@'+str(k_hit):>8}"
+              f"{'NDCG@'+str(k_hit):>9}"
+              f"{'stage1':>8}{'R@'+str(k_rec):>8}{'Hit@'+str(k_hit):>8}"
+              f"{'NDCG@'+str(k_hit):>9}")
+    lines = ["", f"── per-ATA-chapter · {run['name']} " + "─" * 30,
+             f"{'':<57}{'———————— strict ————————':>33}"
+             f"{'——————— relaxed ————————':>33}",
+             header, "-" * len(header)]
+    for row in run["by_chapter"]:
+        s, r = row["strict"], row["relaxed"]
+        lines.append(
+            f"{row['ata_chapter']:<4}{row['chapter_name'][:33]:<34}"
+            f"{row['n_queries']:>6}{('yes' if row['servable'] else 'NO'):>5}"
+            f"{s['stage1_recall']:>8.3f}{s[f'recall_at_{k_rec}']:>8.3f}"
+            f"{s[f'hit_at_{k_hit}']:>8.3f}{s[f'ndcg_at_{k_hit}']:>9.3f}"
+            f"{r['stage1_recall']:>8.3f}{r[f'recall_at_{k_rec}']:>8.3f}"
+            f"{r[f'hit_at_{k_hit}']:>8.3f}{r[f'ndcg_at_{k_hit}']:>9.3f}")
+    lines.append("")
+    lines.append("srv = the chapter holds at least one task row. srv=NO chapters "
+                 "score 0 because nothing is indexed,")
+    lines.append("      not because retrieval failed — do not read them as a "
+                 "quality signal.")
+    return lines
+
+
 def format_table(report: dict) -> str:
     k_hit = report["runs"][0]["k_hit"] if report["runs"] else 5
     k_rec = report["runs"][0]["k_recall"] if report["runs"] else 50
@@ -355,6 +552,14 @@ def format_table(report: dict) -> str:
         f"abstain threshold: {report['threshold']}",
         f"labels        : {report['labels']}",
     ]
+    cov = report.get("coverage")
+    if cov:
+        n_un = cov["n_pairs_unservable"]
+        lines.append(
+            f"corpus        : {cov['n_servable_chapters']} chapters have task rows; "
+            f"{cov['n_pairs_servable']}/{report['n_queries']} pairs "
+            f"({cov['pct_pairs_servable']:.1f}%) are servable, "
+            f"{n_un} {'pair has' if n_un == 1 else 'pairs have'} no corpus at all")
     header = (f"{'run':<34}{'stage1':>8}{'R@'+str(k_rec):>8}"
               f"{'NDCG@'+str(k_hit):>9}{'Hit@'+str(k_hit):>8}{'top1':>8}"
               f"{'abstain':>9}{'conf-wrong':>12}")
@@ -376,6 +581,8 @@ def format_table(report: dict) -> str:
                 f"{cw['rate_above_threshold']:>12.3f}")
     lines += ["", "conf-wrong = share of ALL queries whose top-1 is wrong yet "
                   "scores at or above the abstention threshold."]
+    lines += _pools_section(report, k_hit, k_rec)
+    lines += _chapter_section(report, k_hit, k_rec)
     stats = report.get("reranker_stats")
     if stats:
         calls, fell_back = stats.get("calls", 0), stats.get("fallbacks", 0)

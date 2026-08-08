@@ -395,3 +395,147 @@ def test_settings_tolerate_a_database_without_the_table(tmp_path):
     assert store.get_setting(bare, "online_enabled") == "0"
     assert store.get_setting(None, "theme") == "light"
     bare.close()
+
+
+# ── PDF chapter resolution and task page lookup ─────────────────────────
+
+def _build_pdf(path, pages: list[str]) -> None:
+    """A miniature AMM chapter, one text block per page."""
+    import fitz
+    doc = fitz.open()
+    for text in pages:
+        page = doc.new_page()
+        page.insert_text((54, 72), text, fontsize=9)
+    doc.save(str(path))
+    doc.close()
+
+
+def test_flatten_removes_injected_whitespace():
+    from aivionics.ui import pdfsource
+    assert pdfsource.flatten("34-41-1 1-020-002") == "34-41-11-020-002"
+    assert pdfsource.flatten(" 34-11-01-400-801\n") == "34-11-01-400-801"
+
+
+def test_chapter_of_pads_to_two_digits():
+    from aivionics.ui import pdfsource
+    assert pdfsource.chapter_of("34-11-01-400-801") == "34"
+    assert pdfsource.chapter_of("5-10-00-000-801") == "05"
+
+
+@pytest.fixture
+def corpus(tmp_path, monkeypatch):
+    """A stand-in AMM directory, with config.AMM_DIR pointed at it.
+
+    Without this the resolver falls back to the real corpus on D:, and these
+    tests would pass or fail depending on whether that drive is connected.
+    """
+    from aivionics import config
+    amm = tmp_path / "AMM"
+    amm.mkdir()
+    for chapter in ("34", "31"):
+        (amm / f"{chapter} AMM-1176.pdf").write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(config, "AMM_DIR", amm)
+    return amm
+
+
+def test_chapter_pdf_resolves_by_filename_prefix(corpus):
+    from aivionics.ui import pdfsource
+    assert pdfsource.resolve_chapter_pdf("34", corpus).name == "34 AMM-1176.pdf"
+    assert pdfsource.resolve_chapter_pdf("31", corpus).name == "31 AMM-1176.pdf"
+    assert pdfsource.resolve_chapter_pdf("99", corpus) is None
+
+
+def test_a_stale_source_path_falls_back_to_the_configured_corpus(corpus):
+    """manual.source_file records where the ingest ran, which may have moved."""
+    from aivionics.ui import pdfsource
+    found = pdfsource.resolve_chapter_pdf("34", r"Z:\not-mounted\AMM")
+    assert found is not None and found.name == "34 AMM-1176.pdf"
+
+
+def test_unreachable_everywhere_returns_none(tmp_path, monkeypatch):
+    from aivionics import config
+    from aivionics.ui import pdfsource
+    monkeypatch.setattr(config, "AMM_DIR", tmp_path / "no-such-corpus")
+    assert pdfsource.resolve_chapter_pdf("34", r"Z:\not-mounted\AMM") is None
+
+
+def test_task_page_lookup_tolerates_injected_whitespace(tmp_path):
+    """The real observed form of 34-41-11-020-002 is `34-41-1 1-020-002`."""
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "34 AMM.pdf"
+    _build_pdf(pdf, [
+        "CHAPTER 34 TITLE PAGE",
+        "SUBJECT CHAPTER SECTION SUBJECT CONF PAGE EFFECT\n"
+        "TASK 34-41-11-020-002   201   TBC ALL",
+        "Some other task body text.",
+        "TASK 34-41-1 1-020-002\nWEATHER RADAR - REMOVAL\n1. General\nEND OF TASK",
+    ])
+    hit = pdfsource.find_task_page(pdf, "34-41-11-020-002")
+    assert hit is not None
+    assert hit.page == 3, "must land on the heading, not the contents entry"
+    assert hit.exact is True
+
+
+def test_contents_entry_is_not_mistaken_for_the_heading(tmp_path):
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "31 AMM.pdf"
+    _build_pdf(pdf, [
+        "SUBJECT CHAPTER SECTION SUBJECT CONF PAGE EFFECT\n"
+        "TASK 31-00-00-040-801   901   TBC ALL",
+        "TASK 31-00-00-040-801\nMMEL PREPARATION\n1. General\nEND OF TASK",
+    ])
+    assert pdfsource.find_task_page(pdf, "31-00-00-040-801").page == 1
+
+
+def test_contents_page_is_used_when_there_is_no_body_page(tmp_path):
+    """Better to land on the index than nowhere."""
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "31 AMM.pdf"
+    _build_pdf(pdf, [
+        "SUBJECT CHAPTER SECTION SUBJECT CONF PAGE EFFECT\n"
+        "TASK 31-00-00-040-801   901   TBC ALL",
+        "An unrelated page.",
+    ])
+    hit = pdfsource.find_task_page(pdf, "31-00-00-040-801")
+    assert hit.page == 0 and hit.exact is False
+
+
+def test_cross_reference_is_the_last_resort(tmp_path):
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "34 AMM.pdf"
+    _build_pdf(pdf, ["Cover", "Refer to 34-11-01-400-801 for the removal."])
+    hit = pdfsource.find_task_page(pdf, "34-11-01-400-801")
+    assert hit.page == 1 and hit.exact is False
+
+
+def test_absent_task_and_unreadable_file_return_none(tmp_path):
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "34 AMM.pdf"
+    _build_pdf(pdf, ["TASK 34-11-01-400-801\nEND OF TASK"])
+    assert pdfsource.find_task_page(pdf, "99-99-99-999-999") is None
+    assert pdfsource.find_task_page(tmp_path / "gone.pdf", "34-11-01-400-801") is None
+    not_a_pdf = tmp_path / "broken.pdf"
+    not_a_pdf.write_text("not a pdf at all")
+    assert pdfsource.find_task_page(not_a_pdf, "34-11-01-400-801") is None
+    assert pdfsource.page_count(not_a_pdf) == 0
+
+
+def test_page_index_caches_lookups(tmp_path):
+    from aivionics.ui import pdfsource
+    pdf = tmp_path / "34 AMM.pdf"
+    _build_pdf(pdf, ["Cover", "TASK 34-11-01-400-801\nEND OF TASK"])
+    index = pdfsource.TaskPageIndex()
+    first = index.find(pdf, "34-11-01-400-801")
+    pdf.unlink()                       # a second real scan would now fail
+    assert index.find(pdf, "34-11-01-400-801") == first
+    index.clear()
+    assert index.find(pdf, "34-11-01-400-801") is None
+
+
+def test_viewer_offers_no_export_path():
+    """Standing rule 1: the viewer reads, it never produces a copy."""
+    from pathlib import Path
+    source = Path("src/aivionics/ui/pdfview.py").read_text(encoding="utf-8")
+    for forbidden in ("QFileDialog", "getSaveFileName", "QPrinter",
+                      "QPrintDialog", "doc.save(", "writer.write"):
+        assert forbidden not in source, f"{forbidden} must not appear in the viewer"

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Simplified chevron marker for zoomed-out map views, where the full
+       silhouette turns to mush. Same rotation contract: nose at 0deg,
+       rotate about 8,8. Authored for this project. -->
+  <path fill="currentColor" d="M8 1.5 L13.5 13.5 L8 10.6 L2.5 13.5 Z"/>
+</svg>

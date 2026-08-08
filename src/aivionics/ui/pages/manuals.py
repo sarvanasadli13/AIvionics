@@ -13,12 +13,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame,
-                               QHBoxLayout, QHeaderView, QLabel, QPushButton,
-                               QStackedWidget, QTreeWidget,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
+                               QFrame, QHBoxLayout, QHeaderView, QLabel,
+                               QPushButton, QStackedWidget, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from .. import pdfsource
 from .. import theme as T
+from ..pdfview import PdfViewer
 from ..widgets import (AtaLocator, EmptyState, Placard, SectionHeader,
                        Splitter, Tag, mono_font, ui_font)
 from .base import Page, caption
@@ -34,6 +36,8 @@ class ManualsPage(Page):
         self.manuals: list[dict] = []
         self.current_manual: dict | None = None
         self.current_task: dict | None = None
+        self.current_chapter: str | None = None
+        self.page_index = pdfsource.TaskPageIndex()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -50,6 +54,11 @@ class ManualsPage(Page):
             "then reopen this page.",
             theme=self.theme_name)
         self.stack.addWidget(self.empty)
+
+        self.viewer = PdfViewer(self.theme_name)
+        self.viewer.closed.connect(lambda: self.stack.setCurrentIndex(0))
+        self.stack.addWidget(self.viewer)
+
         outer.addWidget(self.stack, 1)
         self.on_shown()
 
@@ -141,13 +150,26 @@ class ManualsPage(Page):
         dl.addWidget(self.detail_effectivity)
         dl.addStretch(1)
 
-        self.print_btn = QPushButton("  Print locator")
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.open_btn = QPushButton("Open in manual")
+        self.open_btn.setObjectName("Primary")
+        self.open_btn.setEnabled(False)
+        self.open_btn.setToolTip(
+            "Open the chapter PDF inside the app at this task's page")
+        self.open_btn.clicked.connect(self._open_in_manual)
+        actions.addWidget(self.open_btn)
+        self.print_btn = QPushButton("Print locator")
         self.print_btn.setEnabled(False)
         self.print_btn.clicked.connect(self._print_locator)
-        dl.addWidget(self.print_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        actions.addWidget(self.print_btn)
+        actions.addStretch(1)
+        dl.addLayout(actions)
+
         self.print_note = caption(
             "Printing emits the locator only — task number, title, manual, "
-            "revision, effectivity, tail, timestamp and user. Never procedure text.",
+            "revision, effectivity, tail, timestamp and user. Never procedure text. "
+            "The in-app viewer is read-only and cannot export.",
             "Faint", 8)
         dl.addWidget(self.print_note)
         rl.addWidget(detail, 1)
@@ -254,9 +276,17 @@ class ManualsPage(Page):
 
     def _on_task_selected(self, item: QTreeWidgetItem | None, _prev=None) -> None:
         meta = (item.data(0, Qt.ItemDataRole.UserRole) or {}) if item else {}
+        if meta.get("kind") == "chapter":
+            self._show_chapter(meta["chapter"])
+            return
         if meta.get("kind") != "task":
             return
         task = meta["task"]
+        self.current_chapter = pdfsource.chapter_of(task["task_number"])
+        self.open_btn.setText("Open in manual")
+        self.open_btn.setToolTip(
+            "Open the chapter PDF inside the app at this task's page")
+        self.open_btn.setEnabled(True)
         self.current_task = task
         parent = self.detail_locator.parentWidget()
         layout = parent.layout()
@@ -288,6 +318,69 @@ class ManualsPage(Page):
             f"Effectivity: {eff}" if eff
             else "Effectivity: applicability unresolved — verify in controlled data")
         self.print_btn.setEnabled(True)
+
+    def _show_chapter(self, chapter: str) -> None:
+        """Chapter node selected: offer the whole chapter PDF, not a locator."""
+        self.current_chapter = chapter
+        self.current_task = None
+        layout = self.detail_locator.parentWidget().layout()
+        layout.replaceWidget(self.detail_locator,
+                             new := AtaLocator(f"ATA {chapter}", self.theme_name))
+        self.detail_locator.deleteLater()
+        self.detail_locator = new
+        self.detail_title.setText(f"ATA chapter {chapter}")
+        while self.detail_tags.count() > 1:
+            w = self.detail_tags.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.detail_effectivity.setText(
+            "Open the chapter to read it inside the app, or expand it to pick "
+            "a task.")
+        self.open_btn.setText("Open chapter PDF")
+        self.open_btn.setToolTip("Open this chapter's PDF inside the app")
+        self.open_btn.setEnabled(True)
+        self.print_btn.setEnabled(False)
+
+    # ── the PDF viewer ────────────────────────────────────────────────
+    def _chapter_pdf(self, chapter: str):
+        source = (self.current_manual or {}).get("source_file")
+        return pdfsource.resolve_chapter_pdf(chapter, source)
+
+    def _open_in_manual(self) -> None:
+        """Open the chapter PDF, jumping to the task's page when there is one.
+
+        The page lookup reads the text layer of every page until it hits, so
+        it runs behind a wait cursor and is cached per task for the session.
+        A missing drive is reported by the viewer, not raised.
+        """
+        chapter = self.current_chapter
+        if not chapter:
+            return
+        path = self._chapter_pdf(chapter)
+        manual = self.current_manual or {}
+        context = (f"{manual.get('aircraft_type', '—')} · "
+                   f"{manual.get('manual_type', '—')} Rev {manual.get('revision', '—')}"
+                   f" · ATA {chapter}")
+
+        page = None
+        if self.current_task and path is not None:
+            context += f" · TASK {self.current_task['task_number']}"
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                hit = self.page_index.find(path, self.current_task["task_number"])
+            finally:
+                QApplication.restoreOverrideCursor()
+            if hit is None:
+                context += "  (task heading not found — showing page 1)"
+            else:
+                page = hit.page
+                if not hit.exact:
+                    context += "  (nearest reference)"
+
+        # Switch first: fit-to-width measures the viewport, which is only
+        # correct once the viewer is the visible page of the stack.
+        self.stack.setCurrentWidget(self.viewer)
+        self.viewer.open(path, context, page)
 
     def _print_locator(self) -> None:
         if self.current_task and self.ctx:

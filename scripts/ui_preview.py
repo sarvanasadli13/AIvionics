@@ -17,6 +17,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from PySide6.QtCore import Qt                       # noqa: E402
 from PySide6.QtWidgets import QApplication          # noqa: E402
 
-from aivionics import db                             # noqa: E402
+from aivionics import config, db                     # noqa: E402
 from aivionics.ui import auth                        # noqa: E402
 from aivionics.ui import fonts                        # noqa: E402
 from aivionics.ui import theme as T                  # noqa: E402
@@ -41,6 +42,15 @@ OUT = ROOT / "docs" / "status"
 def settle(app: QApplication, rounds: int = 8) -> None:
     for _ in range(rounds):
         app.processEvents()
+
+
+def settle_for(app: QApplication, seconds: float) -> None:
+    """Pump the event loop for a while — QPdfView renders pages off-thread,
+    so a bare processEvents() can grab a blank canvas."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
 
 
 def shoot(app: QApplication, widget, name: str) -> Path:
@@ -64,10 +74,21 @@ def shoot(app: QApplication, widget, name: str) -> Path:
 
 def seed_corpus(con) -> None:
     """A minimal but realistic corpus for the adjudicator screenshot."""
+    # source_file points at the real corpus so the PDF viewer preview opens an
+    # actual AMM chapter rather than a stub.
     con.execute(
         "INSERT INTO manual(id,oem,aircraft_type,manual_type,doc_standard,"
-        "revision,revision_date,is_current) VALUES"
-        "(1,'boeing','B737-8','AMM','ispec2200','48','2026-06-15',1)")
+        "revision,revision_date,is_current,source_file) VALUES"
+        "(1,'boeing','B737-8','AMM','ispec2200','48','2026-06-15',1,?)",
+        (str(config.AMM_DIR),))
+    # A task that genuinely exists in chapter 34 of the corpus (heading on
+    # page 39), so "Open in manual" can demonstrate the page jump.
+    con.execute(
+        "INSERT INTO task(id,manual_id,task_number,function_code,title,"
+        "ata_chapter,ata_section,ata_subject,effectivity_raw,catalogue_only) "
+        "VALUES(2,1,'34-00-00-440-801','440',"
+        "'MMEL 34-11-01 (DDG) Restoration — air data system','34','00','00',"
+        "'TBC ALL',0)")
     con.execute(
         "INSERT INTO task(id,manual_id,task_number,function_code,title,ata_chapter,"
         "ata_section,ata_subject,effectivity_raw,body,catalogue_only,"
@@ -191,6 +212,33 @@ def main() -> int:
             if item.childCount():
                 w2.pages["manuals"].tree.setCurrentItem(item.child(0))
         shoot(app, w2, "manuals-loaded")
+
+        # (e) the in-app PDF viewer, opened on a real AMM chapter page
+        manuals = w2.pages["manuals"]
+        target = None
+        for i in range(manuals.tree.topLevelItemCount()):
+            chapter = manuals.tree.topLevelItem(i)
+            chapter.setExpanded(True)
+            settle(app)
+            for j in range(chapter.childCount()):
+                child = chapter.child(j)
+                meta = child.data(0, Qt.ItemDataRole.UserRole) or {}
+                if meta.get("task", {}).get("task_number") == "34-00-00-440-801":
+                    target = child
+                    break
+            if target:
+                break
+        if target is not None:
+            manuals.tree.setCurrentItem(target)
+            settle(app)
+            manuals._open_in_manual()
+            settle_for(app, 3.0)          # page rendering happens off-thread
+            shoot(app, w2, "manuals-pdf")
+            manuals.viewer.set_theme = getattr(manuals.viewer, "set_theme", None)
+            print(f"     viewer page: {manuals.viewer.page_edit.text()} "
+                  f"{manuals.viewer.page_total.text()}")
+        else:
+            print("  ! chapter 34 task not in the tree — PDF preview skipped")
         w2.close()
         con.close()
         ctx.con.close()
