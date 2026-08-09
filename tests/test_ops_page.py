@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -548,6 +549,109 @@ def test_the_coverage_warning_says_what_a_missing_aircraft_means():
     assert "incomplete coverage by design" in adsb.COVERAGE_WARNING
     assert "not necessarily on the ground" in adsb.COVERAGE_WARNING
     assert "not a traffic display" in adsb.COVERAGE_WARNING
+
+
+# ── GATE 4B: the two structural claims, enforced ────────────────────────
+# Both of these are asserted in prose at the top of `ops/__init__.py` and
+# `ops/net.py`. Prose does not fail a build. These read the source tree with
+# `ast` — no module is imported and nothing is executed — so a fourth network
+# path or an accidental dependency from the offline core breaks the suite on
+# the commit that introduces it, not in a hangar with the cable out.
+
+CORE_PACKAGES = ("parsers", "pipeline", "retrieval", "stats", "eval", "notes")
+CORE_MODULES = ("db.py", "config.py", "audit.py")
+
+# The only two files permitted to open a socket, and why each is allowed.
+SOCKET_MODULES = {
+    "ops/net.py": "the single allow-listed outbound client (standing rule 12)",
+    "llm/client.py": "the Ollama endpoint — local by default, LAN by setting, "
+                     "never the internet (PLAN Phase 5)",
+}
+
+SOCKET_IMPORTS = ("socket", "urllib.request", "http.client", "requests",
+                  "httpx", "aiohttp", "ftplib", "telnetlib", "smtplib")
+
+
+def _source_files():
+    import aivionics
+    # `aivionics` has no __init__.py, so it is a namespace package and
+    # __file__ is None; __path__ is the one thing that always resolves.
+    root = Path(list(aivionics.__path__)[0]).resolve()
+    files = sorted(p for p in root.rglob("*.py")
+                   if "__pycache__" not in p.parts)
+    assert len(files) > 20, f"only found {len(files)} source files under {root}"
+    return root, files
+
+
+def _imports(path) -> set[str]:
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            found.add(node.module)
+    return found
+
+
+def test_the_offline_core_imports_nothing_from_the_ops_package():
+    """Standing rule 12, made checkable.
+
+    "The manuals core, retrieval, case base and statistics must run
+    identically with the network unplugged" is only credible if they cannot
+    reach the online module at all. The UI is exempt: the Ops screen and the
+    Admin allow-list are precisely where the two halves are allowed to meet.
+    """
+    root, files = _source_files()
+    offenders = []
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        core = (relative.split("/")[0] in CORE_PACKAGES
+                or relative in CORE_MODULES)
+        if not core:
+            continue
+        for name in _imports(path):
+            if "aivionics.ops" in name or name.startswith("ops."):
+                offenders.append(f"{relative} imports {name}")
+    assert offenders == [], (
+        "the offline core reached into the online module: " + "; ".join(offenders))
+
+
+def test_only_the_two_declared_modules_can_open_a_socket():
+    """`net.py` claimed to be the only socket in the application. It is not.
+
+    `llm/client.py` opens its own, deliberately — an Ollama endpoint that is
+    localhost by default and may be pointed at a LAN host. That is a
+    different category from an internet call, and it is listed here rather
+    than hidden, because a network path nobody has written down is the one
+    that surprises somebody's IT department.
+    """
+    root, files = _source_files()
+    found = {}
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        opens = sorted(name for name in _imports(path)
+                       if name in SOCKET_IMPORTS
+                       or name.startswith("urllib.request"))
+        if opens:
+            found[relative] = opens
+    assert set(found) == set(SOCKET_MODULES), (
+        f"the set of modules that can open a socket changed: {sorted(found)}. "
+        f"Add it to SOCKET_MODULES with the reason, and put its host in front "
+        f"of IT on the Admin screen.")
+
+
+def test_admin_shows_every_network_path_not_only_the_allow_listed_ones():
+    """GATE 4B asks that IT can audit what the machine talks to — all of it."""
+    from aivionics.llm import client as llm
+    from aivionics.ui.pages.stubs import OnlineSection
+
+    assert llm.is_local_endpoint(llm.DEFAULT_ENDPOINT), (
+        "the LLM endpoint no longer defaults to this machine; Admin's copy "
+        "says it does")
+    assert llm.DEFAULT_ENDPOINT in OnlineSection.LOCAL_ENDPOINT_NOTE
+    assert "not allow-listed" in OnlineSection.LOCAL_ENDPOINT_NOTE
 
 
 # ── the service the screen actually calls ───────────────────────────────

@@ -20,6 +20,7 @@ from ..widgets import (EmptyState, Placard, ProvenanceLine, SectionHeader,
                        StatusBadge, ui_font)
 from .base import Page, caption, scroll_host
 
+from ...llm import client as llm
 from ...ops import net
 
 
@@ -105,6 +106,17 @@ class OnlineSection(QWidget):
 
     toggled = Signal(bool)
 
+    # The second network path in the application, and the reason it is on this
+    # screen rather than folded into the table above: it is not allow-listed,
+    # because it is not an internet host. Leaving it off a screen headed "what
+    # this machine talks to" would make that screen quietly wrong.
+    LOCAL_ENDPOINT_NOTE = (
+        f"The optional LLM layer opens its own connection to an Ollama "
+        f"endpoint, {llm.DEFAULT_ENDPOINT} by default — this machine. It is "
+        f"not allow-listed because it is not an internet host; point it at a "
+        f"LAN server and it stays inside your network. It is off unless the "
+        f"LLM layer is enabled, and every feature works without it.")
+
     def __init__(self, enabled: bool, theme: str = T.DEFAULT_THEME, parent=None):
         super().__init__(parent)
         self.theme_name = theme
@@ -131,11 +143,12 @@ class OnlineSection(QWidget):
         box.addLayout(head)
 
         box.addWidget(caption(
-            "Off by default. With this off the application opens no socket at "
-            "all: the manuals core, retrieval, the case base and the statistics "
-            "run identically with the network cable out, and the Ops screen "
-            "still serves bundled airport data, runways and local time.",
-            "Muted", 8.5))
+            "Off by default. With this off the application makes no internet "
+            "connection at all: the manuals core, retrieval, the case base and "
+            "the statistics run identically with the network cable out, and the "
+            "Ops screen still serves bundled airport data, runways and local "
+            "time. The one connection this switch does not govern is named "
+            "below.", "Muted", 8.5))
 
         box.addWidget(Placard("Allow-listed hosts"))
         hosts = QTableWidget(len(net.HOST_REGISTRY), 3)
@@ -171,6 +184,9 @@ class OnlineSection(QWidget):
         self.activity = QVBoxLayout()
         self.activity.setSpacing(3)
         box.addLayout(self.activity)
+
+        box.addWidget(Placard("Other connections this application can make"))
+        box.addWidget(caption(self.LOCAL_ENDPOINT_NOTE, "Muted", 8.5))
 
         box.addWidget(Placard("Bundled offline sources — never call out"))
         for line in net.OFFLINE_SOURCES:

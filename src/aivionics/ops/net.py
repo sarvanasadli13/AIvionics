@@ -1,9 +1,17 @@
-"""The single outbound network client (PLAN 4B.6, standing rule 12).
+"""The single outbound *internet* client (PLAN 4B.6, standing rule 12).
 
-Nothing in this application opens a socket except through here. That is the
-whole point: IT can read `ALLOWED_HOSTS` in Admin and know exactly what the
-machine talks to, and there is one place to audit for timeouts, retries and
-caching rather than one per feature.
+Nothing in this application reaches a host on the internet except through
+here. That is the whole point: IT can read `ALLOWED_HOSTS` in Admin and know
+exactly what the machine talks to, and there is one place to audit for
+timeouts, retries and caching rather than one per feature.
+
+The qualifier is deliberate and was earned by getting it wrong: this file
+used to claim to be the only socket in the application, and it is not.
+`llm/client.py` opens its own connection to an Ollama endpoint — this
+machine by default, a LAN server by setting, never the internet. It is a
+different category, so it is not allow-listed here; it is named on the Admin
+screen beside this table instead, and `tests/test_ops_page.py` fails if a
+third network path appears anywhere in the tree.
 
 Five properties, each of which exists because its absence is a known failure:
 
