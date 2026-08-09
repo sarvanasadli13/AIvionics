@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+import qtawesome as qta
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -25,27 +25,41 @@ class LoginDialog(QDialog):
     """Frameless, but never trapping: minimise and close are always present."""
 
     def _window_buttons(self, pal: dict) -> QHBoxLayout:
+        """Minimise and close, drawn the same way the main shell draws them.
+
+        These were text glyphs and they rendered as nothing at all. A
+        per-widget stylesheet *cascades* with the global one rather than
+        replacing it, so the global `QPushButton { padding: 7px 15px }`
+        applied here too, and 15 px of padding on each side of a 30 px-wide
+        button leaves a content rectangle exactly 0 px across: the label was
+        laid out into nothing. Hence both changes below. The icons are what
+        the shell's own window buttons use (TitleBar, `#WinBtn`) and Qt
+        centres an icon in the whole button rather than the content box, so
+        they survive the cascade; `padding: 0px` removes the cause anyway, as
+        `#WinBtn` does, so a future edit back to text cannot re-break it.
+        """
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(2)
         row.addStretch(1)
-        for glyph, tip, slot, hover in (
-                ("–", "Minimise", self.showMinimized, pal["s3"]),
-                ("✕", "Close", self.reject, pal["closehover"])):
-            button = QPushButton(glyph)
-            button.setFlat(True)
+        for glyph, name, slot, hover in (
+                ("mdi6.window-minimize", "Minimise", self.showMinimized, pal["s3"]),
+                ("mdi6.close", "Close", self.reject, pal["closehover"])):
+            button = QPushButton()
+            # txt2, not txt3: at this size on a white card the faint tone is
+            # invisible, which defeats the point of putting them there.
+            button.setIcon(qta.icon(glyph, color=pal["txt2"]))
+            button.setIconSize(QSize(13, 13))
             button.setFixedSize(30, 24)
-            button.setToolTip(tip)
+            button.setToolTip(name)
+            button.setAccessibleName(name)
             button.setCursor(Qt.CursorShape.ArrowCursor)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(slot)
-            # txt2, not txt3: at 13 px on a white card the faint tone is
-            # invisible, which defeats the point of putting them there.
             button.setStyleSheet(
-                f"QPushButton{{border:none;background:transparent;"
-                f"color:{pal['txt2']};font-size:15px;font-weight:600;"
+                f"QPushButton{{border:none;background:transparent;padding:0px;"
                 f"border-radius:3px;}}"
-                f"QPushButton:hover{{background:{hover};color:{pal['txt']};}}")
+                f"QPushButton:hover{{background:{hover};}}")
             row.addWidget(button)
         return row
 
@@ -103,7 +117,7 @@ class LoginDialog(QDialog):
         mark = QLabel()
         lockup = config.ASSETS_DIR / "icons" / f"logo-{theme}.svg"
         if lockup.exists():
-            mark.setPixmap(svg_pixmap_wide(lockup, 268, self.devicePixelRatioF()))
+            mark.setPixmap(svg_pixmap_wide(lockup, 210, self.devicePixelRatioF()))
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(mark)
         lay.addSpacing(4)

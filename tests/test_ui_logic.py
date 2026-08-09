@@ -1,8 +1,12 @@
-"""UI logic tests — no Qt event loop, no widgets.
+"""UI logic tests.
 
 Everything the shell relies on that can be got wrong silently: the theme
 token contract, password handling, the locator print block, the adjudication
 queue, and the audit chain across a simulated session.
+
+Almost all of it runs without Qt. The exception is the block at the bottom,
+which grabs the login dialog and counts pixels — see the comment there for
+why nothing cheaper would have caught the bug it guards.
 """
 from __future__ import annotations
 
@@ -539,3 +543,205 @@ def test_viewer_offers_no_export_path():
     for forbidden in ("QFileDialog", "getSaveFileName", "QPrinter",
                       "QPrintDialog", "doc.save(", "writer.write"):
         assert forbidden not in source, f"{forbidden} must not appear in the viewer"
+
+
+# ── login dialog: rendering ─────────────────────────────────────────────
+# The only tests in this file that need Qt widgets, and they earn it. The
+# minimise and close buttons were laid out at the right coordinates and
+# reported isVisible() == True while painting absolutely nothing: the global
+# stylesheet's `QPushButton { padding: 7px 15px }` cascades into their own
+# stylesheet, and on a 30 px-wide button that leaves a content rectangle 0 px
+# across, so the label was laid out into nothing. No geometry assertion can
+# see that. Only pixels can.
+
+WINDOW_BUTTONS = ("Minimise", "Close")
+
+
+@pytest.fixture(scope="module")
+def qt_app():
+    """A QApplication for the whole module, or a skip if there is no display."""
+    import os
+
+    if os.environ.get("QT_QPA_PLATFORM") in {"offscreen", "minimal"}:
+        pytest.skip("needs the native platform: offscreen reports no fonts")
+    widgets = pytest.importorskip("PySide6.QtWidgets")
+    try:
+        app = widgets.QApplication.instance() or widgets.QApplication([])
+    except Exception as exc:                        # pragma: no cover
+        pytest.skip(f"no Qt platform available: {exc}")
+    return app
+
+
+def _shown_login(qt_app, connection, theme):
+    """Lay the dialog out without mapping it to the screen."""
+    from PySide6.QtCore import Qt
+
+    from aivionics.ui import fonts
+    from aivionics.ui.login import LoginDialog
+
+    qt_app.setStyleSheet(fonts.qss(theme))
+    dialog = LoginDialog(connection, theme)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    dialog.show()
+    for _ in range(10):
+        qt_app.processEvents()
+    return dialog
+
+
+def _window_button(dialog, name):
+    from PySide6.QtWidgets import QPushButton
+
+    for button in dialog.findChildren(QPushButton):
+        if button.accessibleName() == name:
+            return button
+    raise AssertionError(f"the login dialog has no {name!r} button")
+
+
+def _ink_in(dialog, button) -> int:
+    """Pixels inside `button` that differ from the surface it sits on.
+
+    The grab is in *device* pixels and widget geometry is in logical ones, so
+    the rectangle has to be scaled. Probing the unscaled coordinates samples a
+    different part of the card entirely, and will report a blank region for a
+    button that is painting perfectly well.
+    """
+    shot = dialog.grab()
+    ratio = shot.devicePixelRatio() or 1.0
+    image = shot.toImage()
+    corner = button.mapTo(dialog, button.rect().topLeft())
+    seen: dict[str, int] = {}
+    for y in range(round(corner.y() * ratio),
+                   round((corner.y() + button.height()) * ratio)):
+        for x in range(round(corner.x() * ratio),
+                       round((corner.x() + button.width()) * ratio)):
+            key = image.pixelColor(x, y).name()
+            seen[key] = seen.get(key, 0) + 1
+    background = max(seen, key=lambda k: seen[k])
+    return sum(seen.values()) - seen[background]
+
+
+@pytest.mark.parametrize("theme", sorted(T.THEMES))
+def test_window_buttons_are_actually_painted(qt_app, tmp_path, theme):
+    connection = db.connect(tmp_path / f"render-{theme}.db")
+    auth.seed(connection)
+    dialog = _shown_login(qt_app, connection, theme)
+    try:
+        for name in WINDOW_BUTTONS:
+            button = _window_button(dialog, name)
+            assert button.isVisible()
+            ink = _ink_in(dialog, button)
+            assert ink > 20, (
+                f"the {name} button drew {ink} pixels that differ from the card "
+                f"in the {theme} theme — it is laid out but invisible")
+    finally:
+        dialog.close()
+        connection.close()
+
+
+def test_close_rejects_the_dialog_so_the_app_can_exit(qt_app, tmp_path):
+    from PySide6.QtWidgets import QDialog
+
+    connection = db.connect(tmp_path / "close.db")
+    auth.seed(connection)
+    dialog = _shown_login(qt_app, connection, "light")
+    try:
+        _window_button(dialog, "Close").click()
+        for _ in range(5):
+            qt_app.processEvents()
+        assert dialog.result() == QDialog.DialogCode.Rejected
+        assert not dialog.isVisible()
+    finally:
+        dialog.close()
+        connection.close()
+
+
+def test_minimise_really_minimises(qt_app, tmp_path):
+    """It only can because the dialog carries Qt.WindowType.Window; without
+    that flag a frameless dialog has no taskbar entry to minimise into."""
+    connection = db.connect(tmp_path / "minimise.db")
+    auth.seed(connection)
+    dialog = _shown_login(qt_app, connection, "light")
+    try:
+        assert not dialog.isMinimized()
+        _window_button(dialog, "Minimise").click()
+        for _ in range(5):
+            qt_app.processEvents()
+        assert dialog.isMinimized()
+    finally:
+        dialog.close()
+        connection.close()
+
+
+def test_the_dialog_can_still_be_dragged_by_its_background(qt_app, tmp_path):
+    """Frameless windows move only because the dialog moves itself."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    connection = db.connect(tmp_path / "drag.db")
+    auth.seed(connection)
+    dialog = _shown_login(qt_app, connection, "light")
+    try:
+        dialog.move(200, 200)
+        for _ in range(3):
+            qt_app.processEvents()
+        origin = dialog.pos()
+        dialog.mousePressEvent(QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress, QPointF(120, 300),
+            QPointF(320, 500), Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        dialog.mouseMoveEvent(QMouseEvent(
+            QMouseEvent.Type.MouseMove, QPointF(150, 340), QPointF(350, 540),
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier))
+        for _ in range(3):
+            qt_app.processEvents()
+        assert dialog.pos() - origin == QPoint(30, 40)
+    finally:
+        dialog.close()
+        connection.close()
+
+
+def test_the_lockup_is_drawn_unstretched_and_tight(qt_app):
+    """The asset's own viewBox decides the height, and it has no dead margin.
+
+    Two regressions this covers. `svg_pixmap` allocates a square, so a 198x64
+    lockup drawn through it comes out stretched to one; and the wordmark used
+    to be live <text> whose `x` sat on a <tspan>, which QSvgRenderer ignores —
+    the name then printed on top of the tile, inside a box a third of which
+    was empty, so the lockup could not be centred.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter, QPixmap
+    from PySide6.QtSvg import QSvgRenderer
+
+    from aivionics import config
+    from aivionics.ui.widgets import svg_pixmap_wide
+
+    for theme in sorted(T.THEMES):
+        path = config.ASSETS_DIR / "icons" / f"logo-{theme}.svg"
+        assert path.exists(), path
+        assert "<text" not in path.read_text(encoding="utf-8"), (
+            f"{path.name} still carries live text; it re-flows on a machine "
+            f"without Segoe UI Variable Display or Georgia")
+
+        box = QSvgRenderer(str(path)).viewBoxF()
+        pixmap = svg_pixmap_wide(path, 210)
+        assert pixmap.width() == 210
+        assert pixmap.height() == round(210 * box.height() / box.width())
+
+        scale = 4
+        canvas = QPixmap(int(box.width()) * scale, int(box.height()) * scale)
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        QSvgRenderer(str(path)).render(painter)
+        painter.end()
+        image = canvas.toImage()
+        rightmost = max(
+            (x for x in range(image.width())
+             if any(image.pixelColor(x, y).alpha() > 12
+                    for y in range(image.height()))),
+            default=-1)
+        margin = (image.width() - rightmost) / scale
+        assert 0 < margin <= 6, (
+            f"{path.name} leaves {margin:.1f} units empty on the right; the "
+            f"lockup cannot sit centred")
