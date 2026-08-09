@@ -35,9 +35,9 @@ h2{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--di
 <h2>Lockup</h2>
 <div class="grid">
   <div class="pane L"><div class="tag">Light</div>
-    <img src="../../assets/icons/logo-light.svg" width="300" height="64" alt=""></div>
+    <img src="../../assets/icons/logo-light.svg" width="198" height="64" alt=""></div>
   <div class="pane D"><div class="tag">Dark</div>
-    <img src="../../assets/icons/logo-dark.svg" width="300" height="64" alt=""></div>
+    <img src="../../assets/icons/logo-dark.svg" width="198" height="64" alt=""></div>
 </div>
 
 <h2>Mark at real sizes</h2>
@@ -79,8 +79,12 @@ h2{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--di
   neutral invert. That is what makes them one logo instead of two.<br><br>
   <b>In the app the mark is inline SVG</b> using <span class="mono">var(--s1)</span> and
   <span class="mono">var(--txt)</span>, so it follows the theme toggle with no second file.<br><br>
-  <b>Convert text to outlines before any final export.</b> The lockups use live text and will re-flow on a
-  machine without Segoe UI Variable or Georgia.
+  <b>The lockup wordmark is outlined</b> (done 2026-08-09). It was set in Segoe UI Variable Display 28px —
+  A at 800, “vionics” at 600 — with the I in Georgia Bold, letter-spacing −0.3, then converted to paths, so
+  it can no longer re-flow on a machine without those faces. Windows 10 has neither. Its box was tightened
+  from 300×64 to <span class="mono">198×64</span> at the same time: the old box was 32% empty on the right,
+  which threw the lockup off-centre anywhere it was centred as a whole. Edit the wordmark by re-setting
+  that specification, not by nudging the curves. The square <b>mark</b> files carry no text and are unchanged.
 </div>
 
 </div></body></html>

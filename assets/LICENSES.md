@@ -108,7 +108,7 @@ No third-party licence. Free to modify.
 | `aircraft/marker-plane.svg` | Fleet-map marker. Nose at 0°, rotate about (16,16) by ADS-B true track |
 | `aircraft/marker-plane-small.svg` | Chevron for zoomed-out views. Rotate about (8,8) |
 | `icons/mark-light.svg` · `icons/mark-dark.svg` | **AIvionics app mark** — square, for the taskbar, title bar and installer |
-| `icons/logo-light.svg` · `icons/logo-dark.svg` | **AIvionics horizontal lockup** — mark + wordmark |
+| `icons/logo-light.svg` · `icons/logo-dark.svg` | **AIvionics horizontal lockup** — mark + wordmark, 198×64, wordmark converted to outlines so it cannot re-flow without Segoe UI Variable Display / Georgia |
 | `icons/chevron-down-light.svg` · `icons/chevron-down-dark.svg` | Combo-box disclosure arrow, stroked in `--txt2` per theme. Qt draws no native arrow on a stylesheet-styled `QComboBox`, so the QSS references these by path |
 
 ### The mark — final, chosen 2026-08-08
