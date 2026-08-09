@@ -35,6 +35,15 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Rebuilding the index after an upgrade is expensive, so the data directory is
 ; never touched by the installer or the uninstaller.
 UninstallDisplayName={#AppName} {#AppVersion}
+; The wizard and the Programs-and-Features entry carry the app mark. Without
+; UninstallDisplayIcon Windows shows a generic box, which is how an install
+; ends up looking untrustworthy to the person asked to approve it.
+SetupIconFile=aivionics.ico
+UninstallDisplayIcon={app}\{#AppExeName}
+AppPublisherURL=https://github.com/
+VersionInfoVersion={#AppVersion}
+VersionInfoProductName={#AppName}
+VersionInfoDescription={#AppName} setup
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
