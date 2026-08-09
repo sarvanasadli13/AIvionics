@@ -18,10 +18,53 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
 from .. import config
 from . import auth, fonts
 from . import theme as T
-from .widgets import Placard, StatusBadge, svg_pixmap, ui_font
+from .widgets import (Placard, StatusBadge, svg_pixmap_wide, ui_font)
 
 
 class LoginDialog(QDialog):
+    """Frameless, but never trapping: minimise and close are always present."""
+
+    def _window_buttons(self, pal: dict) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        row.addStretch(1)
+        for glyph, tip, slot, hover in (
+                ("–", "Minimise", self.showMinimized, pal["s3"]),
+                ("✕", "Close", self.reject, pal["closehover"])):
+            button = QPushButton(glyph)
+            button.setFlat(True)
+            button.setFixedSize(30, 24)
+            button.setToolTip(tip)
+            button.setCursor(Qt.CursorShape.ArrowCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(slot)
+            # txt2, not txt3: at 13 px on a white card the faint tone is
+            # invisible, which defeats the point of putting them there.
+            button.setStyleSheet(
+                f"QPushButton{{border:none;background:transparent;"
+                f"color:{pal['txt2']};font-size:15px;font-weight:600;"
+                f"border-radius:3px;}}"
+                f"QPushButton:hover{{background:{hover};color:{pal['txt']};}}")
+            row.addWidget(button)
+        return row
+
+    def mousePressEvent(self, event):
+        """Frameless windows are not draggable unless we move them ourselves."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_from = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        origin = getattr(self, "_drag_from", None)
+        if origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - origin)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_from = None
+        super().mouseReleaseEvent(event)
+
     def __init__(self, con: sqlite3.Connection, theme: str = T.DEFAULT_THEME,
                  parent: QWidget | None = None):
         super().__init__(parent)
@@ -31,6 +74,9 @@ class LoginDialog(QDialog):
 
         self.setWindowTitle("AIvionics — Sign in")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        # Without Window in the flags a frameless dialog has no taskbar entry,
+        # and showMinimized() has nowhere to minimise to.
+        self.setWindowFlag(Qt.WindowType.Window, True)
         self.setFixedSize(430, 470)
         self.setStyleSheet(fonts.qss(theme))
 
@@ -40,24 +86,27 @@ class LoginDialog(QDialog):
         frame.setGeometry(0, 0, 430, 470)
 
         lay = QVBoxLayout(frame)
-        lay.setContentsMargins(38, 34, 38, 30)
+        lay.setContentsMargins(38, 12, 38, 30)
         lay.setSpacing(0)
 
+        # A frameless dialog has no system buttons, so someone who cannot sign
+        # in has no visible way out except Task Manager. Escape already
+        # rejected the dialog; this makes that possible to discover.
+        lay.addLayout(self._window_buttons(pal))
+        lay.addSpacing(10)
+
+        # The approved horizontal lockup (logo-sheet.html: "Final. Concept B"),
+        # not the square tile plus a retyped wordmark. The tile is the icon
+        # form — using it here and setting the name in live text beside it gave
+        # two versions of the logo on one screen, and the serifed capital I
+        # that the lockup exists to guarantee was being reproduced by hand.
         mark = QLabel()
-        mark_path = config.ASSETS_DIR / "icons" / f"mark-{theme}.svg"
-        if mark_path.exists():
-            mark.setPixmap(svg_pixmap(mark_path, 54, self.devicePixelRatioF()))
+        lockup = config.ASSETS_DIR / "icons" / f"logo-{theme}.svg"
+        if lockup.exists():
+            mark.setPixmap(svg_pixmap_wide(lockup, 268, self.devicePixelRatioF()))
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(mark)
-        lay.addSpacing(13)
-
-        name = QLabel(
-            f'<span style="color:{pal["cy"]};font-weight:800">A'
-            f'<span style="font-family:Georgia,serif">I</span></span>'
-            f'<span style="color:{pal["txt"]}">vionics</span>')
-        name.setFont(ui_font(21, QFont.Weight.DemiBold))
-        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(name)
+        lay.addSpacing(4)
 
         tagline = QLabel("Reliability analysis and manual retrieval")
         tagline.setObjectName("Muted")

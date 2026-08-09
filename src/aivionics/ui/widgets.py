@@ -69,6 +69,31 @@ def svg_pixmap(path: Path, size: int, ratio: float = 1.0) -> QPixmap:
     return px
 
 
+def svg_pixmap_wide(path: Path, width: int, ratio: float = 1.0) -> QPixmap:
+    """Rasterise a non-square SVG at `width`, keeping its own aspect ratio.
+
+    `svg_pixmap` allocates a square and `QSvgRenderer.render` fills whatever
+    rect it is given, so a 300x64 lockup drawn through it comes out stretched
+    to a square. The height is taken from the asset's own viewBox rather than
+    passed in, so the caller cannot get it wrong.
+    """
+    renderer = QSvgRenderer(str(path))
+    if not renderer.isValid():
+        return QPixmap()
+    box = renderer.viewBoxF()
+    aspect = (box.height() / box.width()) if box.width() else 1.0
+    height = max(1, int(round(width * aspect)))
+    px = QPixmap(int(width * ratio), int(height * ratio))
+    px.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(px)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    renderer.render(painter)
+    painter.end()
+    px.setDevicePixelRatio(ratio)
+    return px
+
+
 # ── small building blocks ───────────────────────────────────────────────
 
 class Placard(QLabel):

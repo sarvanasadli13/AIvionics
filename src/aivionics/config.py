@@ -2,13 +2,35 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
+FROZEN = bool(getattr(sys, "frozen", False))
+
+if FROZEN:
+    # In a frozen build `__file__` points inside the bundle, so the source-tree
+    # layout would put the database next to the executable — i.e. inside the
+    # install directory. That is wrong twice over: a per-user install may sit
+    # somewhere the user cannot write, and an uninstall or upgrade would carry
+    # the department's case base away with it. The installer creates
+    # %LOCALAPPDATA%\AIvionics\data for exactly this, and this is what puts the
+    # data there. Caught by a real run: the first frozen launch wrote
+    # aivionics.db into dist\AIvionics\ and the installer then tried to package
+    # a live database.
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+    _local = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    DATA_DIR = Path(os.environ.get("AIVIONICS_DATA",
+                                   str(Path(_local) / "AIvionics" / "data")))
+    # Bundled read-only assets stay beside the executable, where PyInstaller
+    # unpacks them.
+    ASSETS_DIR = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT)) / "assets"
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = Path(os.environ.get("AIVIONICS_DATA", str(PROJECT_ROOT / "data")))
+    ASSETS_DIR = PROJECT_ROOT / "assets"
+
 SDR_DIR = DATA_DIR / "sdr"
 DB_PATH = DATA_DIR / "aivionics.db"
-ASSETS_DIR = PROJECT_ROOT / "assets"
 
 # 737 MAX training-package corpus (external drive)
 CORPUS_ROOT = Path(os.environ.get(

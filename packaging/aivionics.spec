@@ -30,11 +30,12 @@ datas = [
 
 hiddenimports = [
     "aivionics.parsers.boeing",      # registered by import side effect
+    "qtpy", "qtawesome",            # icon fonts, resolved through qtpy
     *collect_submodules("aivionics"),
 ]
 
 a = Analysis(
-    [str(ROOT / "src" / "aivionics" / "ui" / "__main__.py")],
+    [str(ROOT / "packaging" / "launch.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
     datas=datas,
@@ -48,6 +49,10 @@ a = Analysis(
     #    gets pulled in here purely because `qtpy` is installed in the
     #    development environment. The application imports neither — verified,
     #    not assumed.
+    #    `qtpy` itself must SHIP: qtawesome imports it to find the bindings.
+    #    Excluding it produced a frozen build that died with
+    #    "No module named 'qtpy'". With PyQt5/6 excluded it can only resolve
+    #    to PySide6, and launch.py pins QT_API to say so explicitly.
     # 2. torch and transformers. Nothing in this application imports them:
     #    embedding is fastembed over onnxruntime and reranking is FlashRank,
     #    also onnxruntime. PyInstaller's hooks collect torch speculatively
@@ -55,7 +60,7 @@ a = Analysis(
     #    roughly 2 GB — it would dominate the installer for a dependency that
     #    is never loaded (PLAN §4: onnxruntime, not torch).
     excludes=[
-        "PyQt5", "PyQt6", "qtpy", "PySide2",
+        "PyQt5", "PyQt6", "PySide2",
         "torch", "torchvision", "torchaudio", "transformers", "tensorboard",
         # 3. Data and cloud libraries reached transitively and never imported:
         #    pyarrow 79 MB, scipy 58 MB, duckdb 31 MB, babel 31 MB,
