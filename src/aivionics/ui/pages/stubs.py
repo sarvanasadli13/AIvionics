@@ -155,8 +155,12 @@ class OnlineSection(QWidget):
         for i, host in enumerate(net.HOST_REGISTRY):
             for c, value in enumerate((host.host, host.purpose, host.terms)):
                 hosts.setItem(i, c, QTableWidgetItem(value))
-        hosts.setFixedHeight(header.sizeHint().height()
-                             + len(net.HOST_REGISTRY) * (T.ROW_HEIGHT + 8) + 4)
+        # Let the terms wrap to their real height. A fixed row height elided
+        # OpenSky's row mid-sentence, on the clause about incomplete coverage.
+        hosts.resizeRowsToContents()
+        hosts.setFixedHeight(
+            header.sizeHint().height() + 4
+            + sum(hosts.rowHeight(i) for i in range(len(net.HOST_REGISTRY))))
         box.addWidget(hosts)
         box.addWidget(caption(
             "A host outside this list is refused before a socket is opened, "
@@ -179,8 +183,13 @@ class OnlineSection(QWidget):
         """Per-source last fetch. In memory and per session, as it says."""
         while self.activity.count():
             item = self.activity.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # Unparent before deleting: `deleteLater` leaves the old
+                # label painted until the event loop runs, which drew this
+                # section's line twice, in two different places.
+                widget.setParent(None)
+                widget.deleteLater()
         rows = net.ACTIVITY.rows()
         if not rows:
             self.activity.addWidget(caption(
@@ -188,9 +197,12 @@ class OnlineSection(QWidget):
                 "Muted", 8.5))
             return
         for row in rows:
+            # Most source names already name their host; repeating it reads
+            # as a stutter rather than as extra information.
+            where = "" if not row.host or row.host in row.source \
+                else f" ({row.host})"
             self.activity.addWidget(caption(
-                f"{row.source} ({row.host or 'host not recorded'}) — {row.line()}",
-                "Muted", 8.5))
+                f"{row.source}{where} — {row.line()}", "Muted", 8.5))
 
 
 class AdminPage(Page):

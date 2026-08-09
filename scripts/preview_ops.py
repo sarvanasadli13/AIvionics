@@ -210,6 +210,11 @@ def main() -> int:
         if page.results.count():
             page.results.setCurrentRow(0)
         page._on_airport(page.service.airport_detail(AIRPORT))
+        # _on_airport also queues the same fetches on the thread pool, which
+        # would leave the synchronous ones below reading their own cache and
+        # the screenshot labelled "(cache)". Drop it so the image shows the
+        # live path a user sees on first open.
+        page.service.client.cache.clear()
         page._on_weather(page.service.weather(AIRPORT))
         page._on_movements(page.service.movements(AIRPORT))
         shoot(app, page, "ops-airport")

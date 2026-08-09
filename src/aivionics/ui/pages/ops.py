@@ -444,11 +444,25 @@ class OpsPage(Page):
             self._render_unseen(None)
 
     def _run(self, work, done) -> None:
-        """Every call in this file goes through here — never the UI thread."""
+        """Every call in this file goes through here — never the UI thread.
+
+        The signals object is held until it fires: nothing else references
+        it, and a garbage-collected receiver means the result of a fetch
+        already paid for is dropped. It is released afterwards so a long
+        session does not accumulate one per search.
+        """
         signals = self.service.submit(work)
-        signals.done.connect(done)
-        signals.failed.connect(self._on_failed)
         self._jobs.append(signals)
+
+        def finish(payload, handler=done, holder=signals) -> None:
+            handler(payload)
+            if holder in self._jobs:
+                self._jobs.remove(holder)
+
+        signals.done.connect(finish)
+        signals.failed.connect(lambda message, holder=signals: (
+            self._on_failed(message),
+            self._jobs.remove(holder) if holder in self._jobs else None))
 
     def _on_failed(self, message: str) -> None:
         self.provenance.setText(f"Ops: background work failed — {message}")

@@ -201,13 +201,21 @@ class DiskCache:
 
     def get(self, url: str, ttl: float,
             now: datetime | None = None) -> tuple[str, datetime] | None:
-        """Return (body, fetched_at) when a fresh entry exists, else None."""
+        """Return (body, fetched_at) when a fresh entry exists, else None.
+
+        `ttl <= 0` always misses. A caller asking for zero seconds of
+        freshness means "fetch it now", and on Windows the system clock has
+        ~15 ms of resolution — an entry written in the same tick would
+        otherwise be served back as fresh.
+        """
+        if ttl <= 0:
+            return None
         entry = self.peek(url)
         if entry is None:
             return None
         body, fetched_at = entry
         now = now or datetime.now(timezone.utc)
-        if (now - fetched_at).total_seconds() > ttl:
+        if (now - fetched_at).total_seconds() >= ttl:
             return None
         return body, fetched_at
 
@@ -480,9 +488,28 @@ def _qt_types():
 
             def run(self) -> None:                          # pragma: no cover
                 try:
-                    self.signals.done.emit(self.fn())
+                    result = self.fn()
                 except Exception as exc:                    # noqa: BLE001
-                    self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+                    self._emit(self.signals.failed,
+                               f"{type(exc).__name__}: {exc}")
+                else:
+                    self._emit(self.signals.done, result)
+
+            @staticmethod
+            def _emit(signal, payload) -> None:             # pragma: no cover
+                """Emit unless the receiver is gone.
+
+                A window closed, or a page destroyed, while a fetch is still
+                in flight leaves this runnable holding a deleted QObject.
+                Nobody is waiting for the answer, so dropping it is the
+                correct outcome — but Qt raises RuntimeError on the emit, and
+                an unhandled exception on a pool thread prints a traceback
+                that looks like a crash.
+                """
+                try:
+                    signal.emit(payload)
+                except RuntimeError:
+                    pass
 
         _QT_TYPES = (FetchSignals, Job)
     return _QT_TYPES

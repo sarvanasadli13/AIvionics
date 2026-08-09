@@ -375,6 +375,7 @@ def test_the_cache_serves_a_second_call_within_the_ttl(tmp_path):
 
 
 def test_an_expired_cache_entry_is_refetched(tmp_path):
+    """`ttl=0` means fetch now, whatever the clock's resolution says."""
     transport = Recorder(body="first")
     api = client(tmp_path, transport=transport)
     url = "https://aviationweather.gov/api/data/metar?ids=EDDF"
@@ -382,6 +383,15 @@ def test_an_expired_cache_entry_is_refetched(tmp_path):
     transport.body = "second"
     assert api.get(url, "wx", ttl=0).data == "second"
     assert len(transport.calls) == 2
+
+    cache = net.DiskCache(tmp_path / "ttl")
+    stamp = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    cache.put("https://aviationweather.gov/x", "body", "wx", stamp)
+    fresh = cache.get("https://aviationweather.gov/x", 600,
+                      now=stamp + timedelta(seconds=599))
+    assert fresh is not None and fresh[0] == "body"
+    assert cache.get("https://aviationweather.gov/x", 600,
+                     now=stamp + timedelta(seconds=600)) is None
 
 
 def test_a_failed_fetch_falls_back_to_a_stale_entry_and_says_so(tmp_path):
