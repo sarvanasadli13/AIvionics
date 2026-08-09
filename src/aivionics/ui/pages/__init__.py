@@ -6,7 +6,7 @@ from .manuals import ManualsPage
 from .reliability import ReliabilityPage
 from .compliance import CompliancePage
 from .ops import OpsPage
-from .stubs import AdminPage
+from .admin import AdminPage
 
 __all__ = ["HomePage", "DiagnosePage", "ManualsPage", "FleetPage",
            "ReliabilityPage", "CompliancePage", "OpsPage", "AdminPage"]
