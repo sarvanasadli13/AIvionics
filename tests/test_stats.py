@@ -552,3 +552,78 @@ def test_no_statistics_query_attributes_anything_to_an_engineer():
     for path in STATS_SOURCES:
         hits = banned.findall(path.read_text(encoding="utf-8"))
         assert not hits, f"{path.name} selects a person: {hits}"
+
+
+# ── lock robustness (found by a real 20-minute run dying) ────────────────
+def test_the_repeat_writer_waits_out_a_transient_lock(monkeypatch):
+    """A long pass must survive another connection taking a brief write lock.
+
+    Simply starting the application applies the schema, which takes one. The
+    first real run over 1.75 M defects died after 570k pairs because of it,
+    and losing twenty minutes of work to a transient lock is how a tool
+    teaches people to keep paper notes instead.
+    """
+    import sqlite3 as _sq
+    from aivionics.stats import repeat as _repeat
+
+    monkeypatch.setattr(_repeat.time, "sleep", lambda _s: None)
+
+    class FlakyCon:
+        def __init__(self, failures):
+            self.failures = failures
+            self.writes = 0
+
+        def executemany(self, *_a):
+            if self.failures:
+                self.failures -= 1
+                raise _sq.OperationalError("database is locked")
+            self.writes += 1
+
+        def commit(self):
+            pass
+
+    run = _repeat.RepeatRun()
+    con = FlakyCon(failures=2)
+    _repeat._write(con, [(1, 2, 3, 0.9, 0, "34")], run, None)
+    assert con.writes == 1          # succeeded after waiting
+    assert run.pairs == 1
+
+
+def test_the_repeat_writer_gives_up_loudly_rather_than_writing_a_partial_table(
+        monkeypatch):
+    import sqlite3 as _sq
+    from aivionics.stats import repeat as _repeat
+
+    monkeypatch.setattr(_repeat.time, "sleep", lambda _s: None)
+
+    class AlwaysLocked:
+        def executemany(self, *_a):
+            raise _sq.OperationalError("database is locked")
+
+        def commit(self):
+            pass
+
+    with pytest.raises(_sq.OperationalError):
+        _repeat._write(AlwaysLocked(), [(1, 2, 3, 0.9, 0, "34")],
+                       _repeat.RepeatRun(), None)
+
+
+def test_a_non_lock_error_is_not_retried(monkeypatch):
+    """Retrying a schema error would just burn the backoff and fail anyway."""
+    import sqlite3 as _sq
+    from aivionics.stats import repeat as _repeat
+
+    calls = {"n": 0}
+
+    class Broken:
+        def executemany(self, *_a):
+            calls["n"] += 1
+            raise _sq.OperationalError("no such table: repeat_norm")
+
+        def commit(self):
+            pass
+
+    with pytest.raises(_sq.OperationalError):
+        _repeat._write(Broken(), [(1, 2, 3, 0.9, 0, "34")],
+                       _repeat.RepeatRun(), None)
+    assert calls["n"] == 1

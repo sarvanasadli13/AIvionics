@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import sys
+import time
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -204,12 +206,37 @@ def build(con: sqlite3.Connection, *, window_days: int = DEFAULT_WINDOW_DAYS,
     return run
 
 
+LOCK_RETRIES = 6
+LOCK_BACKOFF_S = 5.0
+
+
 def _write(con: sqlite3.Connection, pending: list[tuple], run: RepeatRun,
            progress) -> None:
+    """Write one batch, waiting out a transient writer rather than dying.
+
+    This pass takes twenty minutes over 1.75 M defects, and anything else that
+    opens the database takes a brief write lock while it applies the schema —
+    simply starting the application is enough. Losing the whole run to that is
+    the failure the review named: *"database is locked at the wrong moment
+    teaches users to keep paper notes."* The connection's own busy_timeout
+    covers a short wait; this covers a long one, and gives up loudly rather
+    than silently writing a partial table.
+    """
     if not pending:
         return
-    con.executemany(_INSERT, pending)
-    con.commit()
+    for attempt in range(1, LOCK_RETRIES + 1):
+        try:
+            con.executemany(_INSERT, pending)
+            con.commit()
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == LOCK_RETRIES:
+                raise
+            wait = LOCK_BACKOFF_S * attempt
+            print(f"  database locked by another connection — retrying in "
+                  f"{wait:.0f}s ({attempt}/{LOCK_RETRIES - 1})",
+                  file=sys.stderr, flush=True)
+            time.sleep(wait)
     run.pairs += len(pending)
     pending.clear()
     if progress is not None:
