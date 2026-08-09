@@ -157,10 +157,18 @@ def main() -> int:
         app.setStyleSheet(fonts.qss(ctx.theme_name))
         print("rendering:")
 
-        # (a) login
+        # (a) login, in both themes — it carries the lockup and the only
+        # window buttons a user meets before signing in, and both have been
+        # invisible here before.
         login = LoginDialog(ctx.con, ctx.theme_name)
         shoot(app, login, "login")
         login.close()
+
+        app.setStyleSheet(fonts.qss("dark"))
+        login_dark = LoginDialog(ctx.con, "dark")
+        shoot(app, login_dark, "login-dark")
+        login_dark.close()
+        app.setStyleSheet(fonts.qss(ctx.theme_name))
 
         # (b) home  (c) manuals empty state — corpus absent
         ctx.user = auth.User(1, "s.asadli", "Sarvan Asadli", "engineer", False)
