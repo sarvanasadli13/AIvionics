@@ -304,7 +304,83 @@ Windows Credential Manager, never to the database.
 
 ## About
 
-![About](docs/screenshots/11-about.png)
+AIvionics is a local-first intelligent avionics engineering workstation designed
+to help engineers investigate aircraft defects, identify probable causes, locate
+applicable ATA documentation, review relevant maintenance procedures and prepare
+approved pages for technicians.
+
+The platform brings engineering diagnostics, maintenance documentation,
+historical defect information, fleet awareness, live aircraft tracking, airport
+information, weather and operational data into one unified environment.
+
+AIvionics is designed as an engineering decision-support system. It helps
+engineers retrieve, organize and evaluate evidence while keeping qualified
+personnel in control of every maintenance decision.
+
+### What it replaces having open at once
+
+| |
+|---|
+| Aircraft defect reports |
+| Historical maintenance cases |
+| ATA documentation |
+| AMM, FIM/TSM, WDM, IPC, SRM, CMM and MEL documents |
+| Fleet and aircraft information |
+| Airport and flight information |
+| Weather and operational data |
+| Separate diagnostic and reporting tools |
+
+### Not limited to one aircraft type
+
+AIvionics is designed to support multiple manufacturers, aircraft families,
+models and variants through separate aircraft-specific knowledge packages.
+
+Each knowledge package can contain applicable manuals, revisions, effectivity
+information and historical cases. AIvionics filters its evidence according to
+the selected aircraft and **must not use documentation from an incompatible
+aircraft type.**
+
+### The workflow
+
+| Step | |
+|---|---|
+| 1 | Aircraft and defect information |
+| 2 | Aircraft-effectivity filtering |
+| 3 | Historical-case retrieval |
+| 4 | Applicable ATA and manual retrieval |
+| 5 | AI-assisted analysis |
+| 6 | Probable causes and confidence |
+| 7 | Exact document, task and page references |
+| 8 | Engineer review and feedback |
+
+AIvionics does not replace maintenance manuals. It helps find and organize
+relevant evidence from approved sources.
+
+### Safety and responsibility
+
+> **AIvionics is an engineering decision-support system. It does not replace
+> approved aircraft maintenance documentation, organizational procedures,
+> licensed personnel or regulatory requirements. All recommendations must be
+> independently verified before maintenance action.**
+
+- Probable causes are advisory recommendations, not confirmed diagnoses.
+- AI-generated information must be supported by traceable evidence.
+- Missing or insufficient evidence must be clearly disclosed.
+- Manual applicability and aircraft effectivity must be verified.
+- Only approved documents and pages may be released or printed for technicians.
+- Final maintenance decisions remain the responsibility of authorized personnel.
+
+### Connectivity
+
+- Core manual access and previously indexed engineering information can work
+  locally.
+- Some operational features require an internet connection.
+- Live aircraft tracking, current airport data, weather, imagery and other
+  external information depend on their respective online data providers.
+- Online status does not change the authority or applicability of approved
+  maintenance documents.
+
+### Creator
 
 **AIvionics was conceived, created and directed by Sarvan Asadli.**
 
