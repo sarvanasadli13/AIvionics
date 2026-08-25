@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.png" alt="AIvionics — reliability analysis and manual retrieval for an avionics engineering department" width="100%">
+</p>
+
 # AIvionics
 
 **A reliability-analysis and manual-retrieval tool for an avionics engineering
