@@ -124,6 +124,10 @@ python scripts/ui_preview.py # render every screen to docs/status/
 Every bundled asset has a row in [`assets/LICENSES.md`](assets/LICENSES.md).
 Nothing ships without one.
 
+The source is MIT ([`LICENSE`](LICENSE)). [`NOTICE.md`](NOTICE.md) states what
+that does **not** grant: no right to aircraft maintenance data, and no
+affiliation with any manufacturer named in the software.
+
 | Source | Used for | Licence |
 |---|---|---|
 | [OurAirports](https://github.com/davidmegginson/ourairports-data) | 85,836 airports, runways, frequencies, navaids — bundled | Public domain |
