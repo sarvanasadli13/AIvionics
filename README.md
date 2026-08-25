@@ -46,13 +46,13 @@ shoot a rendered manual page.
 | | |
 |---|---|
 | **Diagnose** — symptom to ranked task locators | **Reliability** — removal→repeat rates by ATA chapter |
-| ![Diagnose](docs/screenshots/03-diagnose.png) | ![Reliability](docs/screenshots/06-reliability.png) |
+| ![Diagnose](docs/screenshots/02-diagnose.png) | ![Reliability](docs/screenshots/06-reliability.png) |
 | **Manuals** — ATA tree, revision control, in-app PDF | **Fleet** — the register, with per-tail defect counts |
-| ![Manuals](docs/screenshots/04-manuals.png) | ![Fleet](docs/screenshots/05-fleet.png) |
+| ![Manuals](docs/screenshots/03-manuals-ata-tree.png) | ![Fleet](docs/screenshots/05-fleet.png) |
 | **Ops** — pan/zoom map, live ADS-B, radar overlay | **Home**, dark |
-| ![Ops](docs/screenshots/08-ops-map.png) | ![Home dark](docs/screenshots/11-home-dark.png) |
+| ![Ops](docs/screenshots/08-ops.png) | ![Home dark](docs/screenshots/13-home-dark.png) |
 
-![Home](docs/screenshots/02-home.png)
+![Home](docs/screenshots/01-home.png)
 
 ## What it does today
 
