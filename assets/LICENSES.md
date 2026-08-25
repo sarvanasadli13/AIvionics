@@ -68,21 +68,16 @@ force even though nothing is bundled.
 |---|---|---|---|
 | 4:3 SVG flags, ISO 3166-1 alpha-2 filenames | **271** | [lipis/flag-icons](https://github.com/lipis/flag-icons) | **MIT** (`flags/LICENSE` retained) |
 
-## Manufacturer logos — `assets/logos/`
+## Manufacturer logos — removed
 
-All from Wikimedia Commons, all tagged **Public domain** there (simple geometry / text logos fall
-below the threshold of originality for copyright). Trademarks remain the property of their owners;
-this is a private, non-distributed project. Verified by rendering — see `_manifest.json` for source
-file, author and Commons page per item.
+`assets/logos/` held six manufacturers' marks (Boeing, Airbus, Embraer,
+Bombardier, Gulfstream) plus an authored ATR placeholder. **They were removed
+before this repository was published, and purged from its history.**
 
-| File | Source | Licence |
-|---|---|---|
-| `boeing.svg` | `File:Boeing full logo.svg` | Public domain |
-| `airbus.svg` | `File:Airbus Logo 2017.svg` | Public domain |
-| `embraer.svg` | `File:Embraer logo.svg` | Public domain |
-| `bombardier.svg` | `File:Bombardier.svg` | Public domain |
-| `gulfstream.svg` | `File:Gulfstream Aerospace logo.svg` | Public domain |
-| `atr.svg` | **Authored placeholder** — Commons holds no ATR logo under any licence. Neutral typographic mark in the app accent; does **not** reproduce ATR branding | none |
+They were justified here as public-domain-by-threshold-of-originality on the
+grounds that this was "a private, non-distributed project". Publication ends
+that assumption: a trademark stays a trademark whatever the copyright status of
+the file, and nothing in the application rendered them in any case.
 
 ## Aircraft photographs — `assets/photos/`
 
