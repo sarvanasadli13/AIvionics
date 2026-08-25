@@ -55,6 +55,27 @@ does not exist in this data, only a repeat-defect proxy. And FAA SDR is a
 *reportable-occurrence* sample, which systematically excludes the low-drama
 removals where NFF concentrates.
 
+### This is v0.1.0, and development continues
+
+**AIvionics is under active development.** `v0.1.0` is the first public release,
+not a finished product, and further releases will follow.
+
+What the next releases are aimed at, roughly in order:
+
+| | |
+|---|---|
+| **Adjudicate the gold set** | Until an engineer has judged those 400 pairs, every retrieval number here is agreement with a regex. This gates everything below it |
+| **Calibrate abstention** | A 0.922 confident-and-wrong rate is the single number keeping this off an engineer's desk. It cannot be fixed before the line above is done |
+| **Widen the corpus** | More aircraft types through separate knowledge packages; FIM/TSM procedure text where an operator's licence permits it |
+| **Close the retrieval gap** | Stage-1 recall is 0.784 and end-to-end is 0.333 — the ranker is losing tasks the candidate generator already found |
+| **Confirmed outcomes** | The case base records what an engineer *did*, never whether it worked. Until that changes, no root-cause claim is possible |
+
+Releases are published under
+[Releases](https://github.com/sarvanasadli13/AIvionics/releases). Version numbers
+follow semantic versioning, and the status table above will be updated with each
+one rather than quietly dropped — a number that improves is worth publishing, and
+one that does not is worth publishing too.
+
 ---
 
 ## What it can do
