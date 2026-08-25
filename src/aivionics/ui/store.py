@@ -14,6 +14,7 @@ EXISTS`` and guarded ``ALTER TABLE`` — so it composes with the schema in
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -21,9 +22,15 @@ from .. import config
 
 # ── settings (PLAN §2 rule 12: online features default off) ─────────────
 DEFAULT_SETTINGS: dict[str, str] = {
-    "online_enabled": "0",
+    # Owner decision 2026-08-21 (BACKLOG R6): the application now starts
+    # with outbound features enabled. This reverses the previous
+    # off-by-default posture, and it is a policy change rather than a
+    # preference — the Admin copy states plainly what it now does.
+    "online_enabled": "1",
     "theme": "light",
     "operator_name": "",
+    "rail_expanded": "1",
+    "world_clock_zones": "",        # empty means "the built-in strip"
 }
 
 _UI_SCHEMA = """
@@ -60,6 +67,10 @@ def ensure_ui_tables(con: sqlite3.Connection) -> None:
     if cols and "must_change_pw" not in cols:
         con.execute(
             "ALTER TABLE app_user ADD COLUMN must_change_pw INTEGER NOT NULL DEFAULT 0")
+    if cols and "recovery_hash" not in cols:
+        # The recovery code is stored the same way the password is - hashed,
+        # never recoverable. Losing both is meant to cost you the account.
+        con.execute("ALTER TABLE app_user ADD COLUMN recovery_hash BLOB")
     for key, value in DEFAULT_SETTINGS.items():
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
                     (key, value))
@@ -85,6 +96,32 @@ def set_setting(con: sqlite3.Connection, key: str, value: str) -> None:
         "INSERT INTO settings(key,value) VALUES(?,?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
     con.commit()
+
+
+def world_clock_zones(con: sqlite3.Connection | None) -> list[tuple[str, str]]:
+    """The operator's clock strip, or [] to mean "use the built-in one".
+
+    Stored as JSON because a label may legitimately contain anything the
+    operator typed, and a delimited string would eventually meet a label with
+    the delimiter in it. Anything unreadable is treated as "not set" rather
+    than as an error: a corrupt preference should cost you your city list,
+    not your Home screen.
+    """
+    raw = get_setting(con, "world_clock_zones", "")
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+        return [(str(label)[:8], str(zone)) for label, zone in rows
+                if str(zone).strip()]
+    except Exception:
+        return []
+
+
+def set_world_clock_zones(con: sqlite3.Connection,
+                          zones: list[tuple[str, str]]) -> None:
+    set_setting(con, "world_clock_zones",
+                json.dumps([[label, zone] for label, zone in zones]))
 
 
 def online_enabled(con: sqlite3.Connection | None) -> bool:
@@ -125,10 +162,30 @@ class CorpusReader:
                      "SELECT DISTINCT aircraft_type FROM manual ORDER BY aircraft_type")
         return [r[0] for r in rows]
 
+    def _has_doc_class(self) -> bool:
+        """Whether this database has been through the documents migration."""
+        if getattr(self, "_doc_class_known", None) is None:
+            try:
+                cols = {r[1] for r in self.con.execute(
+                    "PRAGMA table_info(manual)")}
+            except Exception:                                    # noqa: BLE001
+                cols = set()
+            self._doc_class_known = "doc_class" in cols
+        return self._doc_class_known
+
     def manuals(self, aircraft_type: str | None = None,
                 manual_type: str | None = None) -> list[dict]:
+        # `doc_class` and `display_title` are selected defensively: a
+        # training document that reaches the UI without its class defaults to
+        # "maintenance data" in `documents.is_maintenance`, and the badge then
+        # says the opposite of the truth. COALESCE covers a database opened
+        # before the column was added.
         sql = ("SELECT id, oem, aircraft_type, manual_type, revision, revision_date, "
-               "is_current, source_file FROM manual")
+               "is_current, source_file, "
+               + ("COALESCE(doc_class,'maintenance')" if self._has_doc_class()
+                  else "'maintenance'") + " AS doc_class, "
+               + ("display_title" if self._has_doc_class() else "NULL")
+               + " AS display_title FROM manual")
         where, args = [], []
         if aircraft_type:
             where.append("aircraft_type=?")
@@ -140,8 +197,24 @@ class CorpusReader:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY aircraft_type, manual_type, is_current DESC, revision DESC"
         keys = ("id", "oem", "aircraft_type", "manual_type", "revision",
-                "revision_date", "is_current", "source_file")
+                "revision_date", "is_current", "source_file", "doc_class",
+                "display_title")
         return [dict(zip(keys, r)) for r in _safe(self.con, sql, tuple(args))]
+
+    def has_tasks(self, manual_id: int | None) -> bool:
+        """Whether the indexed corpus contains a task for this manual.
+
+        ManualsPage must ask the same read-only corpus that supplies its
+        selectors and tree.  Asking the shared UI/write connection instead
+        can turn a temporary connection fault into the false claim that an
+        indexed FIM has no task index.
+        """
+        if manual_id is None:
+            return False
+        return bool(_safe(
+            self.con,
+            "SELECT 1 FROM task WHERE manual_id=? LIMIT 1",
+            (manual_id,)))
 
     def chapters(self, manual_id: int) -> list[dict]:
         """ATA chapters in a manual, with task counts and coverage %.

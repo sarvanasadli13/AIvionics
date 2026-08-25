@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .client import LLMUnavailable, OllamaClient
+from .client import LLMUnavailable
 
 SYSTEM = (
     "You summarise prior aircraft maintenance case records for an engineer. "
@@ -135,7 +135,7 @@ def build_prompt(query: str, cases: list[dict]) -> tuple[str, list[str]]:
     return "\n".join(lines), sources
 
 
-def summarise_cases(client: OllamaClient | None, query: str,
+def summarise_cases(client, query: str,
                     cases: list[dict], *,
                     allowed_tasks: set[str] | None = None) -> Summary:
     """Summarise prior cases, or explain why there is no summary.
@@ -156,6 +156,11 @@ def summarise_cases(client: OllamaClient | None, query: str,
     except Exception as exc:                                     # noqa: BLE001
         return Summary(reason=f"model call failed — {type(exc).__name__}: {exc}")
 
-    result = validate(raw, sources=sources, allowed_tasks=allowed_tasks)
-    result.model = getattr(getattr(client, "config", None), "model", "")
+    # A provider may return a `Generation` (the model-service boundary) or a
+    # bare string (the original Ollama client). Both are accepted; neither is
+    # trusted, because `validate` is what stands between this and a screen.
+    text = getattr(raw, "text", raw)
+    result = validate(text, sources=sources, allowed_tasks=allowed_tasks)
+    result.model = (getattr(getattr(client, "config", None), "model", "")
+                    or getattr(client, "model", ""))
     return result

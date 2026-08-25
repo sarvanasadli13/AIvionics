@@ -194,26 +194,23 @@ class AdjudicationQueue:
     # ── writing ───────────────────────────────────────────────────────
     def commit(self, seq: int, verdict: str, correct_task_number: str | None = None,
                note: str | None = None) -> None:
-        """Record a verdict and mark the queue row done.
+        """Refused. `goldreview.GoldReviewService` is the only write path.
 
-        Re-adjudicating a pair replaces its row rather than appending a
-        second one, so the gold set can never hold two verdicts for the
-        same pair.
+        This method used to DELETE the `label_gold` row and INSERT a
+        replacement, with no reviewer identity, no permission check, no
+        revision history and no audit entry. Two independent writers of the
+        gold set is not a duplication problem, it is a provenance problem:
+        nothing downstream could tell which of them produced a given answer.
+
+        The class survives as a read-only adapter because the queue readers
+        and the preview tooling use it. Writing goes through the service.
         """
-        if verdict not in VERDICTS:
-            raise ValueError(f"verdict must be one of {VERDICTS}, got {verdict!r}")
-        pair = self.pair(seq)
-        if pair is None:
-            raise KeyError(f"no queue row at seq {seq}")
+        raise GoldReviewWriteRemoved(
+            "AdjudicationQueue.commit no longer writes the gold set. Use "
+            "aivionics.goldreview.GoldReviewService, which records the "
+            "reviewer, keeps revision history and writes the audit entry in "
+            "the same transaction.")
 
-        correct = (correct_task_number or "").strip() or None
-        self.con.execute(
-            "DELETE FROM label_gold WHERE defect_id=? AND task_number=?",
-            (pair.defect_id, pair.task_number))
-        self.con.execute(
-            "INSERT INTO label_gold(defect_id, task_number, verdict, "
-            "correct_task_number, note, adjudicated_at) VALUES(?,?,?,?,?,?)",
-            (pair.defect_id, pair.task_number, verdict, correct, note,
-             datetime.now(timezone.utc).isoformat()))
-        self.con.execute("UPDATE gold_queue SET done=1 WHERE seq=?", (seq,))
-        self.con.commit()
+
+class GoldReviewWriteRemoved(RuntimeError):
+    """Raised by the retired legacy write path."""

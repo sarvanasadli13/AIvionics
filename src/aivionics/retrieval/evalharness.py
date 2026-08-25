@@ -53,6 +53,26 @@ from .search import SearchResult, SearchRun, Searcher
 DEFAULT_THRESHOLD = 0.35
 
 
+def connect_read_only(path: str | Path) -> sqlite3.Connection:
+    """Open the database for evaluation without any possibility of writing it.
+
+    `db.connect` runs `executescript(SCHEMA)` on every call, which is a write
+    transaction and a migration path. That is right for the application and
+    wrong for measurement: an evaluation sweep must not be able to alter the
+    corpus it is scoring, and a sweep run against the 2.55 GB production
+    database while ingest holds a write lock should fail loudly rather than
+    queue behind it. `mode=ro` makes both guarantees structural instead of
+    conventional — the connection physically cannot issue DDL.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"no database at {path}")
+    uri = f"file:{path.as_posix()}?mode=ro"
+    con = sqlite3.connect(uri, uri=True)
+    con.execute("PRAGMA busy_timeout=60000")
+    return con
+
+
 @dataclass(frozen=True)
 class EvalQuery:
     defect_id: int
@@ -251,6 +271,39 @@ def _mode_metrics(run: SearchRun, q: EvalQuery, key_fn, k_hit: int, k_recall: in
         "ndcg_at_k": ndcg_at_k(hits, len(gold), k_hit),
         "top1_correct": bool(final and final[0] in gold),
     }
+
+
+def score_run(run: SearchRun, q: EvalQuery, k_hit: int = 5,
+              k_recall: int = 50) -> dict:
+    """Both correctness modes for a run that has already been executed.
+
+    Exists so a reranker comparison can score orderings it produced from a
+    **cached** stage-1 candidate list. Re-running retrieval once per reranker
+    would make the comparison depend on three separate stage-1 executions; with
+    one execution shared between them, any difference in the numbers is
+    attributable to the reordering and to nothing else.
+    """
+    return {mode: _mode_metrics(run, q, key_fn, k_hit, k_recall)
+            for mode, key_fn in KEYS.items()}
+
+
+def gold_rank(run: SearchRun, q: EvalQuery, key_fn) -> int | None:
+    """Zero-based rank of the best-placed labelled task in stage-1, or None.
+
+    This is what bounds every reranker. A reranker that reorders a window of
+    the top *k* can only move a gold item into view if that item is already
+    inside the window, so the share of queries whose `gold_rank` is below *k*
+    is the highest Hit@5 any reordering of that window could reach — a perfect
+    one included. Comparing a real reranker against that number separates
+    "this reranker is weak" from "there is nothing left to recover here".
+    """
+    gold = {key_fn(t) for t in q.gold} - {None}
+    if not gold:
+        return None
+    for i, r in enumerate(run.ranked):
+        if key_fn(r.task_number) in gold:
+            return i
+    return None
 
 
 def _aggregate(outcomes: Sequence[QueryOutcome], threshold: float,

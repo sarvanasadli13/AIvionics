@@ -8,6 +8,7 @@ navigation deliberately is **not** — see `AUDITED_ACTIONS` below.
 """
 from __future__ import annotations
 
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -22,7 +23,9 @@ BCRYPT_ROUNDS = 12
 MAX_PW_BYTES = 72          # bcrypt truncates beyond this; reject rather than truncate
 
 SETUP_USERNAME = "admin"
-SETUP_PASSWORD = "aivionics-setup"   # one-time; must_change_pw is set on seed
+# Retained only so an administrator cannot choose the retired public bootstrap
+# value as a real password.  New databases never use a shared setup secret.
+_RETIRED_SETUP_PASSWORD = "aivionics-setup"
 
 ROLES = {
     "admin": "users,roles,ingest,models,settings,audit,read,print",
@@ -37,7 +40,15 @@ ROLES = {
 # (standing rule 6) — and it buys nothing forensically, because the acts that
 # matter to airworthiness (who signed in, what locator was printed) are all
 # captured below.
-AUDITED_ACTIONS = ("login", "logout", "login_failed", "print", "password_change")
+AUDITED_ACTIONS = ("login", "logout", "login_failed", "print",
+                   "password_change", "recovery_issued", "recovery_failed",
+                   "password_reset")
+
+# Recovery codes. No I, O, 0 or 1: this is written on paper and read back by
+# a human, and those four are the pairs that get transcribed wrongly.
+RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+RECOVERY_GROUPS = 4
+RECOVERY_GROUP_LEN = 5
 
 # Throttle repeated failures. In-memory: a desktop app restart clears it,
 # which is acceptable — this defends a human at a keyboard, not a botnet.
@@ -81,10 +92,98 @@ def check_password(password: str, pwhash: bytes) -> bool:
         return False
 
 
-def seed(con: sqlite3.Connection) -> None:
-    """Create the roles and, on a virgin database, the setup admin account.
+def new_recovery_code() -> str:
+    """A code a person can write down and type back: `A7K2M-...`, 20 chars.
 
-    Idempotent. Never resets or re-enables an existing account.
+    20 characters of a 32-symbol alphabet is 100 bits, which is far past what
+    a rate-limited local prompt needs — but a code that is *guessable* is the
+    one failure mode here that nobody would notice, so it is not economised
+    on. `secrets`, never `random`.
+    """
+    groups = ["".join(secrets.choice(RECOVERY_ALPHABET)
+                      for _ in range(RECOVERY_GROUP_LEN))
+              for _ in range(RECOVERY_GROUPS)]
+    return "-".join(groups)
+
+
+def normalise_recovery(code: str) -> str:
+    """Accept what a human types: any case, any spacing, dashes optional."""
+    return "".join(ch for ch in (code or "").upper()
+                   if ch in RECOVERY_ALPHABET)
+
+
+def issue_recovery_code(con: sqlite3.Connection, user: User) -> str:
+    """Mint a new code for `user`, store only its hash, return it once.
+
+    The plaintext exists in memory for exactly as long as the dialog that
+    shows it. There is no way to ask for it again, and that is the point.
+    """
+    code = new_recovery_code()
+    con.execute("UPDATE app_user SET recovery_hash=? WHERE id=?",
+                (hash_password(normalise_recovery(code)), user.id))
+    con.commit()
+    audit.log(con, "recovery_issued", user_id=user.id, entity="app_user",
+              entity_id=user.username)
+    return code
+
+
+def has_recovery_code(con: sqlite3.Connection, user: User) -> bool:
+    row = con.execute("SELECT recovery_hash FROM app_user WHERE id=?",
+                      (user.id,)).fetchone()
+    return bool(row and row[0])
+
+
+def reset_with_recovery(con: sqlite3.Connection, username: str, code: str,
+                        new_password: str) -> tuple[User, str]:
+    """Spend a recovery code to set a new password. Returns (user, next code).
+
+    Deliberately shaped like `authenticate`:
+
+    * **It never says which half was wrong.** "That username and code do not
+      match" for an unknown user, a user with no code on file, and a wrong
+      code alike — otherwise this prompt becomes a way to enumerate accounts.
+    * **It is throttled on the same counter as login**, because an unthrottled
+      reset prompt would be a way around the throttle on the sign-in one.
+    * **The code is spent.** A new one is issued in the same transaction, so
+      the old paper is dead the moment it is used.
+    """
+    name = (username or "").strip()
+    if _locked_out(name):
+        raise ValueError("Too many attempts. Wait 30 seconds and try again.")
+    if len(new_password) < 10:
+        raise ValueError("Password must be at least 10 characters.")
+    if new_password == _RETIRED_SETUP_PASSWORD:
+        raise ValueError("Choose a password other than the setup password.")
+
+    row = con.execute(
+        "SELECT u.id, u.username, u.display_name, r.name, u.recovery_hash, "
+        "u.active FROM app_user u JOIN role r ON r.id = u.role_id "
+        "WHERE u.username = ?", (name,)).fetchone()
+    supplied = normalise_recovery(code)
+    if (row is None or not row[5] or not row[4] or not supplied
+            or not check_password(supplied, row[4])):
+        _record_failure(name)
+        audit.log(con, "recovery_failed", entity="app_user",
+                  entity_id=name or None)
+        raise ValueError("That username and recovery code do not match.")
+
+    user = User(row[0], row[1], row[2], row[3], False)
+    con.execute("UPDATE app_user SET pwhash=?, must_change_pw=0 WHERE id=?",
+                (hash_password(new_password), user.id))
+    con.commit()
+    audit.log(con, "password_reset", user_id=user.id, entity="app_user",
+              entity_id=user.username)
+    reset_throttle(name)
+    return user, issue_recovery_code(con, user)
+
+
+def seed(con: sqlite3.Connection) -> None:
+    """Create roles and an unclaimed administrator on a virgin database.
+
+    The bootstrap hash is made from an unexposed random value.  The login UI
+    detects the ``must_change_pw`` account locally and goes straight to the
+    first-run password form, so there is no universal credential to publish,
+    guess or leave unchanged.  Idempotent; never resets an existing account.
     """
     store.ensure_ui_tables(con)
     for name, perms in ROLES.items():
@@ -96,9 +195,27 @@ def seed(con: sqlite3.Connection) -> None:
         con.execute(
             "INSERT INTO app_user(username,pwhash,display_name,role_id,active,"
             "must_change_pw) VALUES(?,?,?,?,1,1)",
-            (SETUP_USERNAME, hash_password(SETUP_PASSWORD), "Setup Administrator",
-             role_id))
+            (SETUP_USERNAME, hash_password(secrets.token_urlsafe(48)),
+             "Setup Administrator", role_id))
     con.commit()
+
+
+def unclaimed_setup_user(con: sqlite3.Connection) -> User | None:
+    """Return the local first-run account, without authenticating a secret.
+
+    This is intentionally narrow: only the seeded ``admin`` account while its
+    one-time flag is still set.  Ordinary accounts that later need a password
+    reset must use their recovery code; this cannot become an authentication
+    bypass for them.
+    """
+    row = con.execute(
+        "SELECT u.id,u.username,u.display_name,r.name,u.active,"
+        "       COALESCE(u.must_change_pw,0) "
+        "FROM app_user u JOIN role r ON r.id=u.role_id "
+        "WHERE u.username=?", (SETUP_USERNAME,)).fetchone()
+    if row is None or not row[4] or not row[5] or row[3] != "admin":
+        return None
+    return User(row[0], row[1], row[2] or row[1], row[3], True)
 
 
 def _locked_out(username: str) -> bool:
@@ -168,7 +285,7 @@ def change_password(con: sqlite3.Connection, user: User, new_password: str) -> U
     """
     if len(new_password) < 10:
         raise ValueError("Password must be at least 10 characters.")
-    if new_password == SETUP_PASSWORD:
+    if new_password == _RETIRED_SETUP_PASSWORD:
         raise ValueError("Choose a password other than the setup password.")
     con.execute("UPDATE app_user SET pwhash=?, must_change_pw=0 WHERE id=?",
                 (hash_password(new_password), user.id))

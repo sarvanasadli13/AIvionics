@@ -16,9 +16,27 @@ screen are non-negotiable and shaped the layout before there was any data:
 
 Every figure rendered here comes from the database or from the retrieval
 engine's own arithmetic; nothing is generated (standing rule 4).
+
+**The third column is the AI investigation** (Phase 3), and it is a strict
+addition: the deterministic search runs, renders and fails on its own code
+path, and nothing in `_investigate` can reach it. A model that is down, slow,
+wrong or refused changes exactly one column of this screen. Four rules govern
+what that column may say:
+
+  * a hypothesis is never a cause. There are no confirmed outcomes in this
+    data, so the heading, the badge and the standing caveat all say
+    *hypothesis* and the word "cause" never appears without it;
+  * evidence is a category from a closed vocabulary, never a percentage. No
+    number on that side of the screen describes how sure anything is;
+  * an answer that fails grounding is not shown — the violations are shown
+    instead, which is a different thing from a cleaned-up answer;
+  * every claim carries the ids behind it, and the panel footer carries the
+    model, the endpoint, the model the endpoint actually served, and the index
+    version the evidence came out of.
 """
 from __future__ import annotations
 
+import qtawesome as qta
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout,
@@ -27,11 +45,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout,
                                QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
+from ...llm.schemas import EVIDENCE_MEANING
 from .. import theme as T
+from ..aiservice import (ACCEPTED, CANCELLED, FAILED, MALFORMED, NO_EVIDENCE,
+                         REJECTED, UNAVAILABLE, AIService, AISignals,
+                         Investigation)
 from ..notespanel import NotesPanel
 from ..searchservice import SearchService, SearchSignals, index_status
-from ..widgets import (AtaLocator, EmptyState, ProvenanceLine, SectionHeader,
-                       Splitter, Tag, ui_font)
+from ..widgets import (AtaLocator, EmptyState, Placard, ProvenanceLine,
+                       SectionHeader, Splitter, Tag, ui_font)
 from .base import Page, caption
 
 CASE_COLUMNS = ["Tail", "Date", "replaced:", "found:"]
@@ -50,6 +72,85 @@ APPLICABILITY_TEXT = {
     "not_applicable": "effectivity: NOT applicable to this tail",
     "unresolved": "applicability unresolved — verify in controlled data",
     "not_checked": "effectivity not checked — no tail selected",
+}
+
+# ── how the AI column speaks ────────────────────────────────────────────
+
+# The one sentence that sits above every accepted answer. It is not a
+# disclaimer bolted on at the end; it is the finding of the six-model review,
+# which killed the assumption that a rectification label records what was
+# *correct*. It records what was done. Nothing in this corpus is a confirmed
+# outcome, so nothing on this panel may be rendered as one.
+HYPOTHESIS_CAVEAT = (
+    "Evidence-supported hypotheses — not confirmed causes. The case base "
+    "records what an engineer did, never whether it was correct, and it holds "
+    "no confirmed outcomes. Every task number below came from retrieval and "
+    "was checked against the retrieved set; verify in the controlled manual "
+    "before acting."
+)
+
+# Evidence levels, rendered as the closed vocabulary they are. Word, icon and
+# colour together — colour never carries meaning alone anywhere in this
+# application (§4A.1 rule 2). Green is deliberately absent from this table:
+# every level here describes how much evidence exists, and a green badge would
+# read as "confirmed", which is the one thing no answer on this panel is.
+EVIDENCE_STYLE = {
+    "strong": {"token": "cy", "quiet": "cyq", "word": "EVIDENCE: STRONG",
+               "icon": "mdi6.file-document-multiple-outline"},
+    "limited": {"token": "txt2", "quiet": "s3", "word": "EVIDENCE: LIMITED",
+                "icon": "mdi6.file-document-outline"},
+    "conflicting": {"token": "amb", "quiet": "ambq",
+                    "word": "EVIDENCE: CONFLICTING", "icon": "mdi6.call-split"},
+    "insufficient": {"token": "txt3", "quiet": "s3",
+                     "word": "EVIDENCE: INSUFFICIENT",
+                     "icon": "mdi6.help-circle-outline"},
+}
+
+# No authorization records exist, so `unknown` is the only value any honest
+# producer can emit — and it has to read as a question that was asked and came
+# back unanswered, never as a blank.
+AUTHORIZATION_TEXT = {
+    "authorized": "approved for use",
+    "not_authorized": "NOT approved for use",
+    "unknown": "approval state unknown — no authorization record exists",
+}
+
+# What the panel says in each terminal state. The text is here rather than
+# inline so that "the model is down" is visibly one state among several
+# ordinary ones, and not an error path someone can quietly widen.
+STATE_TEXT = {
+    UNAVAILABLE: (
+        "The model is not available",
+        "This column needs a model; the rest of the screen does not. The "
+        "ranked task locators and the prior cases on the left were produced "
+        "by the deterministic retrieval engine and are unaffected — they are "
+        "the answer here, not a degraded version of one."),
+    NO_EVIDENCE: (
+        "Nothing was retrieved to reason over",
+        "Retrieval returned no task and no prior case for this complaint, so "
+        "there is nothing to ground an answer in and the model was not asked. "
+        "A model given no evidence produces its most plausible guess, which is "
+        "exactly the answer this tool exists not to give."),
+    MALFORMED: (
+        "The model's reply was rejected before it was read",
+        "The reply did not parse into a valid answer. It is discarded rather "
+        "than repaired: a malformed answer that has been patched into a "
+        "well-formed one reads exactly like one that was right the first "
+        "time."),
+    REJECTED: (
+        "The answer failed its grounding check and was refused",
+        "Every claim an answer makes must trace to a tool result. This one did "
+        "not, so it is not shown — not with the bad parts removed, either, "
+        "because an answer whose reasoning included an invention is an answer "
+        "whose remaining sentences were reasoned to the same way. What the "
+        "check found is below."),
+    CANCELLED: (
+        "Investigation cancelled",
+        "The work was stopped and whatever had been generated was discarded."),
+    FAILED: (
+        "The investigation could not be completed",
+        "Something failed on the way to an answer. The deterministic search on "
+        "the left is unaffected."),
 }
 
 

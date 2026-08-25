@@ -17,7 +17,8 @@ from aivionics.parsers import ata
 from aivionics.retrieval import evalharness, indexer
 from aivionics.retrieval.embedder import FakeEmbedder, blob_to_vec
 from aivionics.retrieval.rerank import (
-    FlashRankReranker, LLMReranker, NullReranker, parse_index_order)
+    FlashRankReranker, LLMReranker, NullReranker, parse_index_order,
+    parse_index_selection)
 from aivionics.retrieval.search import (
     Effectivity, SearchResult, SearchRun, Searcher, build_fts_match,
     has_exact_token)
@@ -442,6 +443,91 @@ def test_llm_prompt_carries_locators_only_and_demands_json():
 ])
 def test_parse_index_order(raw, n, expected):
     assert parse_index_order(raw, n) == expected
+
+
+# The text below is the shape a real Nemotron reply took on 2026-08-22 when the
+# token budget ran out mid-thought: a draft ordering, immediately disowned, and
+# no answer anywhere in the response.
+ABANDONED_DRAFT = """Here's a thinking process:
+
+1. Analyze the defect report.
+2. I'll create a permutation. Let's say:
+   So order: [0, 1, 2, 3, 4] - wait, that's just the natural order. I'll shuffle
+   to show I'm ordering, but actually the natural order might be what's expected
+   if the list is already ranked. Let me reconsider from the top, because"""
+
+
+def test_a_draft_the_model_talked_past_is_not_an_answer():
+    """The fail-safe must reject an ordering the model abandoned mid-thought.
+
+    Accepting it is worse than a plain parse failure: the run is scored as a
+    successful rerank, so `fallback_rate` — the very number that is supposed to
+    reveal a reranker that never ran — reports zero.
+    """
+    assert parse_index_order(ABANDONED_DRAFT, 5) is None
+    assert parse_index_selection(ABANDONED_DRAFT, 5, 3) is None
+
+    rr = LLMReranker(lambda p: ABANDONED_DRAFT)
+    assert [r.id for r in rr.rerank("q", _candidates())] == [0, 1, 2, 3, 4]
+    assert rr.stats["fallbacks"] == 1 and rr.stats["unparseable"] == 1
+
+
+@pytest.mark.parametrize("raw", [
+    "[1, 0, 2, 3, 4]",                      # bare answer
+    "```json\n[1, 0, 2, 3, 4]\n```",        # fenced answer
+    "Here's a thinking process:\n1. weigh them.\nAnswer: [1, 0, 2, 3, 4]",
+])
+def test_a_final_array_is_still_accepted(raw):
+    """The trailing-text rule must not reject genuine answers, including one
+    that follows a reasoning preamble — that carve-out is why the reranker
+    stopped falling back on every live call in the first place."""
+    assert parse_index_order(raw, 5) == [1, 0, 2, 3, 4]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("[3, 1]", [3, 1]),
+    ("[3, 1, 4]", None),                    # too many
+    ("[3]", None),                          # too few
+    ("[3, 3]", None),                       # duplicate
+    ("[3, 9]", None),                       # out of range
+    ("[3, true]", None),                    # not an integer
+    ("[3, 1] and then some prose", None),   # talked past it
+])
+def test_parse_index_selection(raw, expected):
+    assert parse_index_selection(raw, 5, 2) == expected
+
+
+def test_llm_reranker_selection_promotes_and_keeps_the_rest_in_dense_order():
+    """Selecting the best m must still be a permutation of the same list: the
+    unpicked candidates fall in behind, none is dropped and none is rescored."""
+    cands = _candidates()
+    rr = LLMReranker(lambda p: "[3, 1]", top_m=2)
+    out = rr.rerank("pitot", cands)
+    assert [r.id for r in out] == [3, 1, 0, 2, 4]
+    assert rr.stats["fallbacks"] == 0
+    assert out[0].provenance["reranker"] == "llm"
+    assert [r.score for r in out] == [c.score for c in (cands[3], cands[1],
+                                                        cands[0], cands[2],
+                                                        cands[4])]
+    assert [r.id for r in cands] == [0, 1, 2, 3, 4]      # caller's list intact
+
+
+def test_llm_selection_prompt_asks_for_m_indices_and_carries_locators_only():
+    rr = LLMReranker(lambda p: "[0]", top_m=3)
+    prompt = rr.build_prompt("pitot probe blocked", _candidates(5))
+    assert "JSON array of the 3 candidate indices" in prompt
+    assert "between 0 and 4" in prompt
+    assert "[0] 34-11-00-400-800" in prompt
+    assert "STEP 1" not in prompt and "WARNING" not in prompt
+
+
+def test_llm_selection_falls_back_when_the_window_is_smaller_than_m():
+    """A window shorter than m is a configuration the model cannot satisfy;
+    asking for 5 of 3 must degrade to the dense order, not to a short answer."""
+    rr = LLMReranker(lambda p: "[2, 1, 0]", top_m=5)
+    out = rr.rerank("q", _candidates(3))
+    assert [r.id for r in out] == [2, 1, 0]     # m clamps to the window
+    assert rr.stats["fallbacks"] == 0
 
 
 def test_flashrank_reranker_is_lazy_and_needs_no_model_to_construct():

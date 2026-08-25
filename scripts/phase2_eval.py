@@ -46,7 +46,7 @@ def main() -> int:
                     help="hashed offline embedder — must match how the index was built")
     ap.add_argument("--aircraft-like",
                     help="restrict to airframes whose model matches this SQL "
-                         "LIKE pattern, e.g. '%737%'. ATA task numbers are not "
+                         "LIKE pattern, e.g. '%%737%%'. ATA task numbers are not "
                          "unique across manufacturers, so an unrestricted "
                          "answerable pool counts cross-type number collisions")
     ap.add_argument("--answerable-only", action="store_true",
@@ -54,9 +54,15 @@ def main() -> int:
                          "Measures the engine rather than the size of the "
                          "manual collection; report the coverage fraction "
                          "alongside it, never instead of it")
+    ap.add_argument("--read-only", action="store_true",
+                    help="open the database mode=ro. Use this against the real "
+                         "corpus: db.connect() runs the schema script, which is "
+                         "a write transaction, and an evaluation must not be "
+                         "able to alter the data it is scoring")
     args = ap.parse_args()
 
-    con = db.connect(Path(args.db))
+    con = (evalharness.connect_read_only(args.db) if args.read_only
+           else db.connect(Path(args.db)))
     embedder = FakeEmbedder() if args.fake else FastEmbedder()
     reranker = None
     if args.rerank == "flashrank":

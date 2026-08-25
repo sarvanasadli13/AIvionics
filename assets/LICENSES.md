@@ -35,6 +35,33 @@ gps_code, local_code, home_link, wikipedia_link, keywords`.
 Requires Python ≥3.11. Store the resolved IANA name (never a UTC offset) per
 standing rule in Phase 4B.5, and let `zoneinfo` + `tzdata` handle DST.
 
+## Fetched at runtime, never bundled — added 2026-08-22 (BACKLOG round 2)
+
+Rule 11 governs what ships in `assets/`. Neither of the two sources below puts a byte
+in this repository: both are requested when a screen needs them, cached in
+`data/ops-cache/`, and rendered **with their attribution on screen**. They are recorded
+here anyway, because "we did not ship it" is not an answer to "under what terms are you
+displaying it".
+
+| Source | Used for | Hosts | Licence and obligation |
+|---|---|---|---|
+| **adsb.lol** | Live aircraft positions: the fleet map and the traffic layer (`ops/adsblol.py`) | `api.adsb.lol` | **ODbL 1.0** — attribution and share-alike, **commercial use permitted**. The credit renders on the map. Chosen over adsb.fi, which is *personal, non-commercial only*, and over OpenSky, whose anonymous feed publishes no registration. |
+| **RainViewer** | The precipitation-radar layer on the Ops map (`ops/radar.py`) | `api.rainviewer.com`, `tilecache.rainviewer.com` | Public API, free for **non-commercial** use, attribution required. The credit is painted onto the map itself, not hidden in a menu. |
+| **Wikipedia / Wikimedia Commons** | One photograph per airport (`ops/photos.py`) | `en.wikipedia.org`, `upload.wikimedia.org` | Per-file: mostly **CC BY-SA 4.0**, **CC BY 4.0** or public domain. The author and the licence name are fetched with the image and rendered directly under it. |
+
+> **⚠ Open question, and it is not a technical one.** RainViewer's free tier is
+> **non-commercial**. That is fine for the machine this was built on and it is **not**
+> a decision that has been made for a product sold to an airline. Before any commercial
+> use, either take a RainViewer plan or move the layer to a public-domain source — the
+> US NOAA/NWS MRMS composite is public domain but covers the United States only.
+> Flagged here rather than discovered by a customer.
+
+**Photographs are filtered, not taken blind.** The obvious API returns Frankfurt's
+*logo*, and a logo is a trademark rather than a licensed photograph — so
+`photos.NOT_A_PHOTO` refuses logos, wordmarks, flags, maps and diagrams, and the picker
+prefers files that are actually of the airport. This keeps the ban on operator logos in
+force even though nothing is bundled.
+
 ## Country flags — `assets/flags/`
 
 | Asset | Count | Source | Licence |

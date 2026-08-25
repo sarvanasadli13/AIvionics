@@ -120,6 +120,7 @@ QComboBox:focus, QTreeWidget:focus, QTableWidget:focus, QListWidget:focus {
     color: $txt3; font-size: 10px; font-weight: 600;
     border: 1px solid $line; border-radius: 3px; padding: 2px 8px;
 }
+#TitleBadge[live="true"] { color: $cy; border-color: $cy; background: $cyq; }
 #WinBtn, #WinBtnClose {
     background: transparent; border: none; border-radius: 0px; color: $txt2;
     font-size: 12px; width: 46px; padding: 0px;
@@ -151,6 +152,25 @@ QComboBox:focus, QTreeWidget:focus, QTableWidget:focus, QListWidget:focus {
 #RailBtn:checked { background: $cyq; color: $cy; }
 #RailBtn:disabled { color: $txt3; }
 #RailSep { background: $line; }
+
+/* Rail destinations. Separate from #RailBtn, which the PDF viewer reuses as
+   its generic quiet icon button — the two must not drift into each other.
+   The section name is set in $txt2, not $txt3: $txt3 on the rail's own
+   gradient is 3.2:1, under the 4.5:1 this project holds itself to. */
+#RailNav {
+    background: transparent; border: none; border-radius: 6px;
+    color: $txt2; padding: 0px; min-width: 0px; text-align: center;
+}
+#RailNav[expanded="true"] { text-align: left; padding-left: 12px; }
+#RailNav[dimmed="true"] { color: $txt3; }
+#RailNav:hover { background: $s2; color: $txt; }
+#RailNav:checked { background: $cyq; color: $cy; }
+#RailNav:focus { border: 2px solid $cy; }
+#RailToggle {
+    background: transparent; border: none; border-radius: 5px; padding: 0px;
+}
+#RailToggle:hover { background: $s2; }
+#RailToggle:focus { border: 2px solid $cy; }
 
 /* ── page furniture ───────────────────────────────────────────────── */
 #PageHeader {

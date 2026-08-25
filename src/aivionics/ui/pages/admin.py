@@ -24,11 +24,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QFormLayout,
-                               QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMessageBox, QPushButton, QSpinBox,
-                               QTableWidget, QTableWidgetItem, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import store
 from .. import theme as T
@@ -56,12 +53,345 @@ class AdminPage(Page):
         self.tabs = QTabWidget()
         self.tabs.addTab(scroll_host(self._system_tab()), "System")
         self.tabs.addTab(self._fleet_tab(), "Fleet register")
+        self.tabs.addTab(scroll_host(self._ai_tab()), "AI assistant")
         self.tabs.addTab(self._audit_tab(), "Audit")
         lay.addWidget(self.tabs, 1)
 
         self.footer = ProvenanceLine("")
         self.footer.setContentsMargins(15, 6, 15, 12)
         lay.addWidget(self.footer)
+
+    # ── AI assistant ──────────────────────────────────────────────────
+    def _ai_tab(self) -> QWidget:
+        """Configure the model. The API key is write-only from here: it is
+        typed in, handed to Windows Credential Manager and cleared from the
+        widget. It is never read back, rendered, logged or copied."""
+        from ...llm import aiconfig
+
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(15, 14, 15, 15)
+        lay.setSpacing(12)
+
+        card, inner = self._card(
+            "AI assistant",
+            "Advisory reasoning over retrieved evidence. Deterministic "
+            "search, manuals and printing work without it.")
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(7)
+
+        self.ai_enabled = QCheckBox("Enable AI assistant")
+        form.addWidget(self.ai_enabled, 0, 0, 1, 2)
+
+        self.ai_preset = QComboBox()
+        for key, preset in aiconfig.PRESETS.items():
+            self.ai_preset.addItem(preset["label"], key)
+        self.ai_preset.currentIndexChanged.connect(self._apply_ai_preset)
+        form.addWidget(QLabel("Preset"), 1, 0)
+        form.addWidget(self.ai_preset, 1, 1)
+
+        self.ai_provider = QLineEdit()
+        self.ai_endpoint = QLineEdit()
+        self.ai_model = QLineEdit()
+        self.ai_model.setFont(mono_font(9.5, QFont.Weight.Normal))
+        for row, (label, widget) in enumerate(
+                (("Provider", self.ai_provider), ("Endpoint", self.ai_endpoint),
+                 ("Model", self.ai_model)), start=2):
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(widget, row, 1)
+
+        self.ai_key = QLineEdit()
+        self.ai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ai_key.setPlaceholderText("paste a new key to replace the stored one")
+        form.addWidget(QLabel("API key"), 5, 0)
+        form.addWidget(self.ai_key, 5, 1)
+
+        self.ai_key_state = caption("", "Muted", 8.5)
+        form.addWidget(self.ai_key_state, 6, 1)
+
+        self.ai_privacy = QCheckBox(
+            "I understand that defect text and retrieved evidence excerpts "
+            "are sent to the configured remote endpoint")
+        self.ai_privacy.setToolTip(
+            "Only the defect description, aircraft applicability and small "
+            "retrieved excerpts are sent. Never whole manuals, audit logs, "
+            "account information or filesystem paths.")
+        form.addWidget(self.ai_privacy, 7, 0, 1, 2)
+
+        self.ai_rerank = QCheckBox(
+            "Use the model to re-rank retrieval results (experimental)")
+        self.ai_rerank.setToolTip(
+            "Held-out evaluation did not show an improvement. Off by default, "
+            "and configuring a model never turns it on.")
+        form.addWidget(self.ai_rerank, 8, 0, 1, 2)
+        form.setColumnStretch(1, 1)
+        inner.addLayout(form)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.ai_save = QPushButton("Save configuration")
+        self.ai_save.setObjectName("Primary")
+        self.ai_save.clicked.connect(self.save_ai_configuration)
+        row.addWidget(self.ai_save)
+        self.ai_remove = QPushButton("Remove stored key")
+        self.ai_remove.clicked.connect(self.remove_ai_key)
+        row.addWidget(self.ai_remove)
+        self.ai_test = QPushButton("Test connection")
+        self.ai_test.clicked.connect(self.test_ai_connection)
+        row.addWidget(self.ai_test)
+        self.ai_cancel = QPushButton("Cancel")
+        self.ai_cancel.setVisible(False)
+        self.ai_cancel.clicked.connect(self.cancel_ai_test)
+        row.addWidget(self.ai_cancel)
+        row.addStretch(1)
+        inner.addLayout(row)
+
+        self.ai_status = QLabel("")
+        self.ai_status.setFont(mono_font(9, QFont.Weight.Normal))
+        self.ai_status.setWordWrap(True)
+        self.ai_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        inner.addWidget(self.ai_status)
+        lay.addWidget(card)
+        lay.addStretch(1)
+        return host
+
+    def _apply_ai_preset(self) -> None:
+        from ...llm import aiconfig
+        preset = aiconfig.PRESETS.get(self.ai_preset.currentData())
+        if not preset:
+            return
+        self.ai_provider.setText(preset["provider"])
+        self.ai_endpoint.setText(preset["endpoint"])
+        self.ai_model.setText(preset["model"])
+
+    def refresh_ai_tab(self) -> None:
+        from ...llm import aiconfig
+        settings = aiconfig.load(self._con())
+        self.ai_enabled.setChecked(settings.enabled)
+        self.ai_provider.setText(settings.provider)
+        self.ai_endpoint.setText(settings.endpoint)
+        self.ai_model.setText(settings.model)
+        self.ai_privacy.setChecked(settings.privacy_ack)
+        self.ai_rerank.setChecked(settings.rerank_enabled)
+        for index in range(self.ai_preset.count()):
+            preset = aiconfig.PRESETS[self.ai_preset.itemData(index)]
+            if preset["model"] == settings.model:
+                self.ai_preset.blockSignals(True)
+                self.ai_preset.setCurrentIndex(index)
+                self.ai_preset.blockSignals(False)
+                break
+        source = aiconfig.key_source()
+        backend = aiconfig.credential_backend()
+        # A stored key is reported as a *state*, never as a value.
+        self.ai_key_state.setText(
+            f"Credential stored — {source}" if source
+            else (f"No credential stored. Secure store: {backend}"
+                  if backend else
+                  f"No credential stored, and no secure store on this machine. "
+                  f"Set {aiconfig.ENV_KEY} in the environment."))
+        self._render_ai_status()
+
+    def _render_ai_status(self) -> None:
+        from ...llm import aiconfig
+        current = aiconfig.status(self._con())
+        described = current.settings.describe()
+        self.ai_status.setText(
+            f"State            {current.label}\n"
+            f"Display name     {described['display_name']}\n"
+            f"Provider         {described['provider']}\n"
+            f"Endpoint         {described['endpoint']}\n"
+            f"Requested model  {described['requested_model']}\n"
+            f"Served model     {described['served_model']}\n"
+            f"Last verified    {described['last_verified']}\n"
+            f"Credential       {described['credential']}")
+
+    def _require_admin(self) -> bool:
+        from ...llm import aiconfig
+        from ... import goldreview
+        user = getattr(self.ctx, "user", None)
+        perms = goldreview.permissions_for(self._con(), user)
+        if "settings" in perms or "roles" in perms:
+            return True
+        QMessageBox.warning(self, "Not permitted",
+                            "Only an administrator may change AI settings.")
+        return False
+
+    def save_ai_configuration(self) -> None:
+        from dataclasses import replace
+        from ...llm import aiconfig
+        from ... import audit
+
+        if not self._require_admin():
+            return
+        con = self._con()
+        if con is None:
+            return
+        settings = replace(
+            aiconfig.load(con),
+            enabled=self.ai_enabled.isChecked(),
+            provider=self.ai_provider.text().strip(),
+            endpoint=self.ai_endpoint.text().strip(),
+            model=self.ai_model.text().strip(),
+            privacy_ack=self.ai_privacy.isChecked(),
+            rerank_enabled=self.ai_rerank.isChecked())
+
+        try:
+            aiconfig.validate_settings(settings)
+        except ValueError as exc:
+            self.ai_key.clear()
+            QMessageBox.warning(self, "Invalid AI configuration", str(exc))
+            return
+
+        key = self.ai_key.text()
+        if key.strip():
+            try:
+                where = aiconfig.store_api_key(key, con=con)
+            except aiconfig.CredentialError as exc:
+                QMessageBox.warning(self, "Key not stored", str(exc))
+                return
+            finally:
+                # Cleared whether or not it was stored, so it cannot be read
+                # off the screen or captured in a screenshot.
+                self.ai_key.clear()
+            audit.log(con, "ai_credential_stored",
+                      user_id=getattr(self.ctx.user, "id", None),
+                      entity="ai", entity_id=where)
+            # ``settings`` was loaded before the credential changed. Do not
+            # let its old proof overwrite the fail-closed state just recorded
+            # by store_api_key().
+            settings = replace(settings, last_ok_at="", last_served_model="",
+                               last_error="")
+
+        aiconfig.save(con, settings)
+        audit.log(con, "ai_configuration_changed",
+                  user_id=getattr(self.ctx.user, "id", None), entity="ai",
+                  entity_id=settings.model,
+                  payload={"enabled": settings.enabled,
+                           "provider": settings.provider})
+        self._reload_ai_consumers()
+        self.refresh_ai_tab()
+        self.refresh()
+
+    def remove_ai_key(self) -> None:
+        from ...llm import aiconfig
+        from ... import audit
+        if not self._require_admin():
+            return
+        if aiconfig.remove_api_key(self._con()):
+            audit.log(self._con(), "ai_credential_removed",
+                      user_id=getattr(self.ctx.user, "id", None), entity="ai")
+            QMessageBox.information(self, "Removed",
+                                    "The stored API key has been deleted.")
+        else:
+            QMessageBox.information(
+                self, "Nothing removed",
+                "No key was stored by AIvionics. A key supplied through the "
+                f"{aiconfig.ENV_KEY} environment variable is not managed here.")
+        aiconfig.invalidate()
+        self.refresh_ai_tab()
+
+    def test_ai_connection(self) -> None:
+        """Run the full serving test off the UI thread.
+
+        The worker receives an **immutable snapshot**, never this page's
+        SQLite connection. Handing the UI connection to a QRunnable made every
+        settings read on that thread return the module defaults silently — so
+        verification reported Disabled instead of testing the configured
+        provider. `record_result` stays here, on the UI thread.
+        """
+        from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+        from ...llm import aiconfig
+        from ... import audit
+
+        con = self._con()
+        if con is None:
+            return
+        if getattr(self, "_ai_test_running", False):
+            return
+
+        current, api_key = aiconfig.snapshot(con)      # read on this thread
+        if not current.can_request:
+            QMessageBox.warning(self, "Cannot test", current.label)
+            return
+
+        self._ai_test_running = True
+        self._ai_cancel = False
+        self.ai_test.setEnabled(False)
+        self.ai_cancel.setVisible(True)
+        self.ai_status.setText("State            checking…")
+
+        class Signals(QObject):
+            done = Signal(object)
+
+        signals = Signals()
+        page = self
+
+        def finished(result):
+            page._ai_test_running = False
+            page.ai_test.setEnabled(True)
+            page.ai_cancel.setVisible(False)
+            cancelled = (result.state is aiconfig.AIState.CHECKING)
+            if not cancelled:
+                # Recorded on the UI thread, with the UI connection.
+                aiconfig.record_result(con, state=result.state,
+                                       served_model=result.served_model)
+                audit.log(con, "ai_connection_tested",
+                          user_id=getattr(page.ctx.user, "id", None),
+                          entity="ai", entity_id=result.state.value,
+                          payload={"served_model_confirmed":
+                                   bool(result.served_model)})
+            page._reload_ai_consumers()
+            page.refresh_ai_tab()
+            page.refresh()
+            if cancelled:
+                QMessageBox.information(self, "Cancelled",
+                                        "The connection test was cancelled. "
+                                        "No result was recorded.")
+            elif result.ok:
+                QMessageBox.information(
+                    self, "Connection verified",
+                    f"The endpoint served {result.served_model}.")
+            else:
+                QMessageBox.warning(
+                    self, "Not verified",
+                    f"{result.label}"
+                    + (f"\n\n{result.detail}" if result.detail else ""))
+
+        signals.done.connect(finished)
+
+        class Job(QRunnable):
+            def run(self):                                       # noqa: D102
+                try:
+                    result = aiconfig.verify_settings(
+                        current.settings, api_key,
+                        should_cancel=lambda: page._ai_cancel)
+                except Exception as exc:                         # noqa: BLE001
+                    result = aiconfig.VerifyResult(
+                        aiconfig.AIState.UNREACHABLE,
+                        detail=type(exc).__name__)
+                signals.done.emit(result)
+
+        QThreadPool.globalInstance().start(Job())
+
+    def cancel_ai_test(self) -> None:
+        """Stop between stages. No outcome is recorded for a cancelled test."""
+        self._ai_cancel = True
+        self.ai_status.setText("State            cancelling…")
+
+    def _reload_ai_consumers(self) -> None:
+        """A configuration change takes effect without restarting."""
+        from ...llm import aiconfig
+        aiconfig.invalidate()
+        window = getattr(self.ctx, "window", None)
+        for key in ("diagnose",):
+            page = getattr(window, "pages", {}).get(key) if window else None
+            service = getattr(page, "service", None)
+            reload_fn = getattr(service, "reload_configuration", None)
+            if callable(reload_fn):
+                reload_fn()
 
     # ── helpers ───────────────────────────────────────────────────────
     def _con(self) -> sqlite3.Connection | None:
@@ -266,6 +596,11 @@ class AdminPage(Page):
 
     # ── data ──────────────────────────────────────────────────────────
     def on_shown(self) -> None:
+        super().on_shown() if hasattr(super(), "on_shown") else None
+        try:
+            self.refresh_ai_tab()
+        except Exception:                                        # noqa: BLE001
+            pass
         self.refresh()
 
     def refresh(self) -> None:

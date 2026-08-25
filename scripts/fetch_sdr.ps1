@@ -1,7 +1,9 @@
 # Phase 0.1 — download all 32 FAA SDR year files (1995-2026).
 # Idempotent: skips files already present with >1MB. Logs bytes+rows per file.
 $ErrorActionPreference = "Continue"
-$out = "C:\Users\Sarvan\Desktop\Avionics Workstation\data\sdr"
+# Resolve relative to the repository, so this runs from any clone.
+$repo = Split-Path -Parent $PSScriptRoot
+$out = Join-Path $repo "data\sdr"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $log = Join-Path $out "_download_log.csv"
 "file,bytes,rows,status" | Out-File $log -Encoding utf8

@@ -20,7 +20,16 @@ def _row_hash(ts: str, user_id, action: str, entity, entity_id,
 
 def log(con: sqlite3.Connection, action: str, user_id: int | None = None,
         entity: str | None = None, entity_id: str | None = None,
-        payload: dict | None = None) -> None:
+        payload: dict | None = None, commit: bool = True) -> None:
+    """Append one link to the chain.
+
+    ``commit=False`` leaves the row in the caller's open transaction instead
+    of committing it. That exists so an auditable act and its audit entry can
+    be made atomic: committing the act first and then logging permits a
+    durable change with no record of who made it, which is the one failure
+    this table exists to prevent. Every existing caller keeps the old
+    behaviour by default.
+    """
     ts = datetime.now(timezone.utc).isoformat()
     payload_hash = hashlib.sha256(
         json.dumps(payload or {}, sort_keys=True).encode()).hexdigest()
@@ -32,7 +41,8 @@ def log(con: sqlite3.Connection, action: str, user_id: int | None = None,
         "INSERT INTO audit_log(ts,user_id,action,entity,entity_id,"
         "payload_hash,prev_hash,row_hash) VALUES(?,?,?,?,?,?,?,?)",
         (ts, user_id, action, entity, entity_id, payload_hash, prev_hash, rh))
-    con.commit()
+    if commit:
+        con.commit()
 
 
 def verify_chain(con: sqlite3.Connection) -> tuple[bool, int]:

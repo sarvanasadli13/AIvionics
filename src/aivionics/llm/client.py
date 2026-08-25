@@ -20,15 +20,32 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from typing import Callable, Iterator, Sequence
 from urllib.parse import urlparse
+
+from .service import (Cancelled, CancelToken, Generation, ModelIdentity,
+                      Stopwatch, Usage)
 
 # Gemma 3 4B at Q4_K_M is ~2.5 GB on disk and comfortably the largest model
 # worth running on an office workstation.
 DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "gemma3:4b"
 MIN_RAM_GB = 16.0
+
+# Providers this application can talk to. `ollama` is the local development
+# runtime it started on; `openai` is every OpenAI-compatible server — NVIDIA
+# NIM, vLLM, TensorRT-LLM, SGLang — which is how the Nemotron work is served.
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_OPENAI = "openai"
+PROVIDERS = (PROVIDER_OLLAMA, PROVIDER_OPENAI)
+
+# NVIDIA's hosted catalogue, and the model selected for this project. Reachable
+# without local hardware, which is what makes the AI work startable at all on a
+# 4 GB laptop — but hosted NIM has no availability guarantee and is a
+# development and evaluation endpoint, not a production dependency.
+NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1"
+NEMOTRON_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 # Hard timeouts, both of them. A hung generate must not become a hung UI, and
 # the health probe runs on a screen the user is waiting on.
@@ -55,10 +72,30 @@ class LLMConfig:
     min_ram_gb: float = MIN_RAM_GB
     temperature: float = 0.0
     num_predict: int = 400
+    provider: str = PROVIDER_OLLAMA
+    # Never rendered, never logged, never put in an error message.
+    api_key: str = ""
 
     @property
     def is_local(self) -> bool:
         return is_local_endpoint(self.endpoint)
+
+    @property
+    def is_openai_compatible(self) -> bool:
+        return self.provider == PROVIDER_OPENAI
+
+    @classmethod
+    def for_nim(cls, api_key: str = "", *, enabled: bool = False,
+                model: str = NEMOTRON_MODEL) -> "LLMConfig":
+        """A configuration pointed at NVIDIA's hosted catalogue.
+
+        The timeout is generous on purpose: a reasoning model emits its chain
+        of thought before the answer, and a budget sized for the answer alone
+        times out inside the thinking.
+        """
+        return cls(endpoint=NIM_ENDPOINT, model=model, enabled=enabled,
+                   provider=PROVIDER_OPENAI, api_key=api_key, timeout=120.0,
+                   health_timeout=8.0)
 
     def with_endpoint(self, endpoint: str) -> "LLMConfig":
         return replace(self, endpoint=endpoint)
@@ -71,6 +108,7 @@ class Health:
     models: tuple[str, ...] = ()
     model_present: bool = False
     endpoint: str = ""
+    identity: ModelIdentity = dataclass_field(default_factory=ModelIdentity)
 
     @property
     def usable(self) -> bool:
@@ -90,6 +128,17 @@ class RamGate:
 def is_local_endpoint(endpoint: str) -> bool:
     host = (urlparse(endpoint or "").hostname or "").lower()
     return host in LOCAL_HOSTS
+
+
+def validate_endpoint(endpoint: str) -> str:
+    """Accept only an HTTP(S) model endpoint with an explicit host."""
+    value = (endpoint or "").strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("model endpoint must use HTTP or HTTPS and include a host")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("model endpoint must not contain credentials, query, or fragment")
+    return value
 
 
 def total_ram_gb() -> float | None:
@@ -132,6 +181,9 @@ def total_ram_gb() -> float | None:
 
 def ram_gate(config: LLMConfig, ram_gb: float | None = None) -> RamGate:
     """Apply the 16 GB floor — but only to a locally hosted model."""
+    if config.is_openai_compatible:
+        return RamGate(True, "the model runs on the configured server, not on "
+                             "this machine", ram_gb, applies=False)
     if not config.is_local:
         return RamGate(True, f"model is served by {config.endpoint} — "
                              f"this machine's memory is not the constraint",
@@ -174,8 +226,14 @@ class OllamaClient:
 
     def __init__(self, config: LLMConfig | None = None,
                  transport: Transport | None = None) -> None:
-        self.config = config or LLMConfig()
+        resolved = config or LLMConfig()
+        self.config = replace(resolved,
+                              endpoint=validate_endpoint(resolved.endpoint))
         self.transport = transport or urllib_transport
+
+    @property
+    def provider(self) -> str:
+        return PROVIDER_OLLAMA
 
     # ── plumbing ─────────────────────────────────────────────────────────
     def _url(self, path: str) -> str:
@@ -188,9 +246,9 @@ class OllamaClient:
         except (urllib.error.URLError, socket.timeout, OSError, ValueError) as exc:
             raise LLMUnavailable(f"{self.config.endpoint} — {exc}") from exc
 
-    def _options(self) -> dict:
+    def _options(self, max_tokens: int | None = None) -> dict:
         return {"temperature": self.config.temperature,
-                "num_predict": self.config.num_predict}
+                "num_predict": int(max_tokens or self.config.num_predict)}
 
     # ── health ───────────────────────────────────────────────────────────
     def health(self) -> Health:
@@ -212,22 +270,54 @@ class OllamaClient:
         reason = "reachable" if present else (
             f"reachable, but {self.config.model} is not pulled "
             f"— run: ollama pull {self.config.model}")
-        return Health(True, reason, names, present, self.config.endpoint)
+        identity = ModelIdentity(
+            requested=self.config.model,
+            served=self.config.model if present else "",
+            provider=self.provider,
+            endpoint=self.config.endpoint,
+            available=names)
+        return Health(True, reason, names, present, self.config.endpoint,
+                      identity)
+
+    def identity(self) -> ModelIdentity:
+        return self.health().identity
 
     # ── generation ───────────────────────────────────────────────────────
-    def generate(self, prompt: str, *, system: str | None = None) -> str:
+    def generate(self, prompt: str, *, system: str | None = None,
+                 max_tokens: int | None = None,
+                 cancel: CancelToken | None = None) -> Generation:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         payload = {"model": self.config.model, "prompt": prompt,
-                   "stream": False, "options": self._options()}
+                   "stream": False, "options": self._options(max_tokens)}
         if system:
             payload["system"] = system
-        with self._open("/api/generate", payload, self.config.timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
+        with Stopwatch() as watch:
+            with self._open("/api/generate", payload, self.config.timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        if cancel is not None and cancel.cancelled:
+            raise Cancelled("generation cancelled")
         try:
-            return str(json.loads(raw).get("response", ""))
+            body = json.loads(raw)
         except ValueError as exc:
             raise LLMUnavailable(f"non-JSON answer from the model — {exc}") from exc
+        text = str(body.get("response", ""))
+        served = str(body.get("model") or self.config.model)
+        finish = str(body.get("done_reason") or "")
+        identity = ModelIdentity(
+            requested=self.config.model, served=served, provider=self.provider,
+            endpoint=self.config.endpoint)
+        usage = Usage(
+            prompt_tokens=int(body.get("prompt_eval_count") or 0),
+            completion_tokens=int(body.get("eval_count") or 0),
+            latency_ms=watch.ms,
+            truncated=finish == "length",
+            finish_reason=finish)
+        return Generation(text=text, identity=identity, usage=usage, raw=raw)
 
-    def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
+    def stream(self, prompt: str, *, system: str | None = None,
+               max_tokens: int | None = None,
+               cancel: CancelToken | None = None) -> Iterator[str]:
         """Yield response fragments as they arrive (Ollama emits NDJSON).
 
         A malformed line is skipped rather than aborting the stream: half a
@@ -235,11 +325,13 @@ class OllamaClient:
         the validator is what stands between this text and the screen anyway.
         """
         payload = {"model": self.config.model, "prompt": prompt,
-                   "stream": True, "options": self._options()}
+                   "stream": True, "options": self._options(max_tokens)}
         if system:
             payload["system"] = system
         with self._open("/api/generate", payload, self.config.timeout) as resp:
             for line in resp:
+                if cancel is not None and cancel.cancelled:
+                    raise Cancelled("generation cancelled")
                 if isinstance(line, bytes):
                     line = line.decode("utf-8", "replace")
                 line = line.strip()
@@ -259,7 +351,36 @@ class OllamaClient:
         """Adapter for `retrieval.rerank.LLMReranker`, which takes any
         `llm(prompt) -> str` and falls back to dense order on anything it
         cannot parse."""
-        return lambda prompt: self.generate(prompt)
+        return lambda prompt: self.generate(prompt).text
+
+
+def build_service(config: LLMConfig | None = None, transport=None):
+    """The client for `config.provider`. One seam, two implementations.
+
+    Returns something satisfying `llm.service.ModelService` in both cases, so
+    callers never branch on which runtime is behind the endpoint.
+    """
+    config = config or LLMConfig()
+    if config.is_openai_compatible:
+        from .openai_compat import OpenAICompatClient
+        is_nvidia_nemotron = (
+            "nvidia.com" in config.endpoint
+            and config.model == NEMOTRON_MODEL)
+        return OpenAICompatClient(
+            config.endpoint, config.model, api_key=config.api_key,
+            timeout=config.timeout, health_timeout=config.health_timeout,
+            temperature=config.temperature,
+            provider="nvidia-nim" if "nvidia.com" in config.endpoint
+            else "openai-compatible",
+            transport=transport,
+            # Nemotron's structured-output guidance uses deterministic JSON
+            # mode with thinking disabled.  The maintenance answer is checked
+            # against a strict schema and grounding gate; a private reasoning
+            # trace only consumes the budget and can truncate the JSON.
+            json_mode=is_nvidia_nemotron,
+            enable_thinking=False,
+            prefer_streaming=is_nvidia_nemotron)
+    return OllamaClient(config, transport)
 
 
 def build_reranker(client: OllamaClient | None):
@@ -275,22 +396,68 @@ def build_reranker(client: OllamaClient | None):
     return LLMReranker(client.as_callable())
 
 
-def describe(config: LLMConfig, health: Health | None,
-             gate: RamGate | None) -> Sequence[tuple[str, str]]:
-    """Rows for the Admin panel: what is configured and what is actually true."""
+def _where(config: LLMConfig) -> str:
+    if config.is_openai_compatible:
+        return "  (remote server)" if not config.is_local else "  (this machine)"
+    return "  (this machine)" if config.is_local else "  (LAN host)"
+
+
+def describe(config: LLMConfig, health=None, gate: RamGate | None = None
+             ) -> Sequence[tuple[str, str]]:
+    """Rows for the Admin panel: what is configured, and what is actually true.
+
+    The two are different questions and only the second one matters. A hosted
+    catalogue lists models it will not serve, so a configured model name is not
+    evidence that anything is answering — the served identity is read back and
+    a mismatch is stated rather than smoothed over.
+
+    The API key is never a row here, in any form.
+    """
     rows = [
-        ("Endpoint", config.endpoint +
-         ("  (this machine)" if config.is_local else "  (LAN host)")),
-        ("Model", config.model),
-        ("Enabled", "yes" if config.enabled else "no — the app is complete without it"),
+        ("Provider", {PROVIDER_OLLAMA: "Ollama",
+                      PROVIDER_OPENAI: "OpenAI-compatible server"}
+         .get(config.provider, config.provider)),
+        ("Endpoint", config.endpoint + _where(config)),
+        ("Model requested", config.model),
+        ("AI features", "enabled" if config.enabled else
+         "disabled — every screen works without a model"),
+        ("Without the model", "search, manuals, statistics and locator "
+                              "printing all continue"),
     ]
-    if gate is not None:
+    if config.is_openai_compatible:
+        rows.append(("Credential",
+                     "an API key is configured" if config.api_key
+                     else "none — the endpoint must allow anonymous access"))
+    if gate is not None and gate.applies:
         rows.append(("Installed memory",
                      f"{gate.ram_gb:.1f} GB" if gate.ram_gb else "not detected"))
         rows.append(("Memory gate", gate.reason))
-    if health is not None:
-        rows.append(("Health", health.reason if health.ok
-                     else f"unreachable — {health.reason}"))
-        if health.ok:
-            rows.append(("Models present", ", ".join(health.models) or "none"))
+
+    if health is None:
+        return rows
+
+    rows.append(("Health", health.reason if health.ok
+                 else f"unreachable — {health.reason}"))
+    identity = getattr(health, "identity", None)
+    if identity is not None and (identity.served or identity.requested):
+        rows.append(("Model served", identity.describe()))
+        if getattr(health, "serving_wrong_model", False):
+            rows.append((
+                "⚠ Mismatch",
+                f"this endpoint is answering as {identity.served}, not "
+                f"{identity.requested} — anything it returns came from a "
+                f"different model than the one configured"))
+    latency = getattr(health, "latency_ms", 0.0)
+    if latency:
+        rows.append(("Last check", f"{latency:.0f} ms"))
+    checked = getattr(health, "checked_at", 0.0)
+    if checked:
+        from datetime import datetime, timezone
+        rows.append(("Checked at", datetime.fromtimestamp(
+            checked, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")))
+    if health.ok and health.models:
+        shown = ", ".join(health.models[:6])
+        if len(health.models) > 6:
+            shown += f", and {len(health.models) - 6} more"
+        rows.append(("Models this endpoint lists", shown))
     return rows

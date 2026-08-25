@@ -10,3 +10,27 @@ build/
 dist/
 *.egg-info/
 .playwright-mcp/
+
+# Secrets never live in the tree; the NVIDIA key is in Windows Credential
+# Manager. These patterns are belt-and-braces for anyone who adds a file.
+.env
+*.env
+*.key
+*.pem
+secrets.*
+
+# Internal working artefacts. `docs/status/` carries development screenshots,
+# one of which renders a page of the Boeing AMM marked "UNRELEASED DATA".
+# The published set is docs/screenshots/, which contains no manual page.
+docs/status/
+db-backup/
+
+# Manual corpora are licensed OEM data and are never committed. They are read
+# from the path in AIVIONICS_CORPUS.
+*.pdf
+
+# Internal handover notes, written to an AI agent mid-build. Kept on disk but
+# not published: they are stale (they quote an older test count) and one of
+# them documents a default setup credential.
+docs/NEXT-SESSION.md
+docs/NOTES-FOR-CODEX.md

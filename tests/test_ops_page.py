@@ -337,6 +337,22 @@ def test_subdomains_of_an_allow_listed_host_are_accepted():
     assert not net.is_allowed("http://aviationweather.gov/x")
 
 
+def test_redirects_cannot_escape_the_outbound_allow_list():
+    handler = net._AllowlistedRedirectHandler()
+    request = net.urllib.request.Request(
+        "https://aviationweather.gov/api/data/metar")
+
+    accepted = handler.redirect_request(
+        request, None, 302, "Found", {},
+        "https://api.opensky-network.org/states/all")
+    assert accepted.full_url == "https://api.opensky-network.org/states/all"
+
+    with pytest.raises(net.urllib.error.URLError, match="allow-list"):
+        handler.redirect_request(
+            request, None, 302, "Found", {},
+            "https://attacker.invalid/collect")
+
+
 def test_every_network_entry_point_is_a_no_op_when_online_is_off(tmp_path):
     """GATE 4B: the application does no work at all on behalf of an online
     feature while the switch is off."""
@@ -347,8 +363,8 @@ def test_every_network_entry_point_is_a_no_op_when_online_is_off(tmp_path):
     results = [
         weather.fetch_metar(api, "EDDF"),
         weather.fetch_taf(api, "EDDF"),
-        adsb.fetch_arrivals(api, "EDDF"),
-        adsb.fetch_departures(api, "EDDF"),
+        adsb.fetch_recorded_arrivals(api, "EDDF"),
+        adsb.fetch_recorded_departures(api, "EDDF"),
     ]
     for result in results:
         assert result.ok is False
@@ -528,7 +544,7 @@ def test_an_inferred_airport_with_several_candidates_is_flagged(tmp_path):
         "firstSeen": 1785990000, "lastSeen": 1786000000,
         "departureAirportCandidatesCount": 1,
         "arrivalAirportCandidatesCount": 4}])
-    movements = adsb.fetch_arrivals(
+    movements = adsb.fetch_recorded_arrivals(
         client(tmp_path, transport=Recorder(body=body)), "EDDF")
     assert movements.ok is True
     flight = movements.flights[0]
@@ -538,7 +554,7 @@ def test_an_inferred_airport_with_several_candidates_is_flagged(tmp_path):
 
 
 def test_no_movements_is_reported_as_an_answer_not_a_failure(tmp_path):
-    movements = adsb.fetch_departures(
+    movements = adsb.fetch_recorded_departures(
         client(tmp_path, transport=Recorder(body="[]")), "EDDF")
     assert movements.ok is False
     assert "no departures recorded" in movements.fetch.error
@@ -561,11 +577,16 @@ def test_the_coverage_warning_says_what_a_missing_aircraft_means():
 CORE_PACKAGES = ("parsers", "pipeline", "retrieval", "stats", "eval", "notes")
 CORE_MODULES = ("db.py", "config.py", "audit.py")
 
-# The only two files permitted to open a socket, and why each is allowed.
+# The only files permitted to open a socket, and why each is allowed.
 SOCKET_MODULES = {
     "ops/net.py": "the single allow-listed outbound client (standing rule 12)",
     "llm/client.py": "the Ollama endpoint — local by default, LAN by setting, "
                      "never the internet (PLAN Phase 5)",
+    "llm/openai_compat.py":
+        "the OpenAI-compatible model endpoint — NVIDIA NIM, vLLM, "
+        "TensorRT-LLM or SGLang, wherever the operator points it. Unlike the "
+        "Ollama client this one *is* commonly an internet host, so it carries "
+        "an API key and its endpoint and served model are both shown in Admin",
 }
 
 SOCKET_IMPORTS = ("socket", "urllib.request", "http.client", "requests",

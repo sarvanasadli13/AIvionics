@@ -214,6 +214,15 @@ def versions(con: sqlite3.Connection | None = None, *,
             chain_ok, rows = audit.verify_chain(con)
         except sqlite3.Error:
             chain_ok = None
+    if not llm_model and con is not None:
+        # Callers used to omit this, so the panel printed "not configured"
+        # whatever was actually saved. The status comes from the one shared
+        # seam, so Admin and About cannot disagree about the model.
+        try:
+            from ..llm import aiconfig
+            llm_model = aiconfig.status(con).summary
+        except Exception:                                        # noqa: BLE001
+            llm_model = ""
     return Versions(
         app=app_version(), schema=SCHEMA_VERSION,
         index_version=config.INDEX_VERSION, embed_model=config.EMBED_MODEL,

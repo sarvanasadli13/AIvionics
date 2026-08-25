@@ -143,12 +143,13 @@ class OnlineSection(QWidget):
         box.addLayout(head)
 
         box.addWidget(caption(
-            "Off by default. With this off the application makes no internet "
-            "connection at all: the manuals core, retrieval, the case base and "
-            "the statistics run identically with the network cable out, and the "
-            "Ops screen still serves bundled airport data, runways and local "
-            "time. The one connection this switch does not govern is named "
-            "below.", "Muted", 8.5))
+            "On by default since 2026-08-21 \u2014 a change of posture, and it is "
+            "stated here rather than left to be discovered. Switch it off and "
+            "the application makes no internet connection at all: the manuals "
+            "core, retrieval, the case base and the statistics run identically "
+            "with the network cable out, and the Ops screen still serves "
+            "bundled airport data, runways and local time. The one connection "
+            "this switch does not govern is named below.", "Muted", 8.5))
 
         box.addWidget(Placard("Allow-listed hosts"))
         hosts = QTableWidget(len(net.HOST_REGISTRY), 3)

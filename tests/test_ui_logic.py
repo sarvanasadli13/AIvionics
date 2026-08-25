@@ -31,6 +31,12 @@ def con(tmp_path):
     connection.close()
 
 
+def _claim_setup(connection, password="a-much-better-secret"):
+    user = auth.unclaimed_setup_user(connection)
+    assert user is not None and user.must_change_pw
+    return auth.change_password(connection, user, password)
+
+
 # ── theme ───────────────────────────────────────────────────────────────
 
 def test_qss_generated_for_every_theme():
@@ -92,11 +98,11 @@ def test_seed_is_idempotent(con):
     assert con.execute("SELECT COUNT(*) FROM app_user").fetchone()[0] == 1
 
 
-def test_setup_login_succeeds_but_demands_a_new_password(con):
-    result = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD)
-    assert result.ok
-    assert result.user.must_change_pw is True
-    assert result.user.role == "admin"
+def test_setup_account_has_no_public_bootstrap_password(con):
+    user = auth.unclaimed_setup_user(con)
+    assert user is not None and user.role == "admin"
+    assert not auth.authenticate(con, auth.SETUP_USERNAME,
+                                "aivionics-setup").ok
 
 
 def test_wrong_password_is_rejected_without_revealing_which_part(con):
@@ -107,31 +113,33 @@ def test_wrong_password_is_rejected_without_revealing_which_part(con):
 
 
 def test_must_change_flow_clears_the_flag(con):
-    result = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD)
-    updated = auth.change_password(con, result.user, "a-much-better-secret")
+    updated = _claim_setup(con)
     assert updated.must_change_pw is False
 
     again = auth.authenticate(con, auth.SETUP_USERNAME, "a-much-better-secret")
     assert again.ok and again.user.must_change_pw is False
     assert not auth.authenticate(con, auth.SETUP_USERNAME,
-                                 auth.SETUP_PASSWORD).ok
+                                 "aivionics-setup").ok
 
 
 def test_weak_or_unchanged_passwords_are_refused(con):
-    user = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD).user
+    user = auth.unclaimed_setup_user(con)
     with pytest.raises(ValueError):
         auth.change_password(con, user, "short")
     with pytest.raises(ValueError):
-        auth.change_password(con, user, auth.SETUP_PASSWORD)
+        auth.change_password(con, user, "aivionics-setup")
 
 
 def test_repeated_failures_are_throttled(con):
+    _claim_setup(con)
     for _ in range(auth.LOCKOUT_AFTER):
         auth.authenticate(con, auth.SETUP_USERNAME, "wrong")
-    result = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD)
+    result = auth.authenticate(con, auth.SETUP_USERNAME,
+                               "a-much-better-secret")
     assert not result.ok and "wait" in result.reason.lower()
     auth.reset_throttle(auth.SETUP_USERNAME)
-    assert auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD).ok
+    assert auth.authenticate(con, auth.SETUP_USERNAME,
+                             "a-much-better-secret").ok
 
 
 def test_signature_is_initial_plus_surname():
@@ -148,8 +156,8 @@ def test_page_navigation_is_not_an_audited_action():
 # ── audit chain ─────────────────────────────────────────────────────────
 
 def test_chain_intact_across_a_simulated_session(con):
-    result = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD)
-    user = auth.change_password(con, result.user, "a-much-better-secret")
+    user = _claim_setup(con)
+    auth.authenticate(con, auth.SETUP_USERNAME, "a-much-better-secret")
     auth.authenticate(con, auth.SETUP_USERNAME, "wrong")
     printing.record_print(con, user_id=user.id, task_id=None,
                           manual_revision="48", aircraft_id=None,
@@ -160,13 +168,14 @@ def test_chain_intact_across_a_simulated_session(con):
     assert ok
     assert rows >= 5
     actions = [r[0] for r in con.execute("SELECT action FROM audit_log ORDER BY id")]
-    assert actions[0] == "login"
+    assert actions[0] == "password_change"
     assert actions[-1] == "logout"
     assert "print" in actions and "login_failed" in actions
 
 
 def test_tampering_with_a_row_breaks_the_chain(con):
-    auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD)
+    _claim_setup(con)
+    auth.authenticate(con, auth.SETUP_USERNAME, "a-much-better-secret")
     auth.logout(con, auth.User(1, "admin", "admin", "admin", False))
     con.execute("UPDATE audit_log SET action='nothing_happened' WHERE id=1")
     con.commit()
@@ -220,7 +229,7 @@ def test_unresolved_effectivity_fails_closed():
 
 
 def test_print_writes_both_a_print_log_row_and_an_audit_row(con):
-    user = auth.authenticate(con, auth.SETUP_USERNAME, auth.SETUP_PASSWORD).user
+    user = _claim_setup(con)
     printing.print_locator(con, TASK, MANUAL, AIRCRAFT, user)
     assert con.execute("SELECT COUNT(*) FROM print_log").fetchone()[0] == 1
     assert con.execute(
@@ -276,45 +285,37 @@ def test_pair_carries_the_defect_the_task_and_its_hazards(con):
     assert pair.has_body
 
 
-def test_commit_writes_the_verdict_and_marks_the_row_done(con):
+def _mark_done(con, seq: int, verdict: str) -> None:
+    """Mark a queue row answered without going through the retired writer."""
+    row = con.execute("SELECT defect_id, task_number FROM gold_queue "
+                      "WHERE seq=?", (seq,)).fetchone()
+    con.execute("INSERT INTO label_gold(defect_id, task_number, verdict, "
+                "adjudicated_at) VALUES(?,?,?, '2026-01-01T00:00:00Z')",
+                (row[0], row[1], verdict))
+    con.execute("UPDATE gold_queue SET done=1 WHERE seq=?", (seq,))
+    con.commit()
+
+
+def test_the_legacy_write_path_is_closed(con):
+    """`AdjudicationQueue.commit` used to be a second, unauthenticated writer
+    of `label_gold` — no reviewer, no history, no audit entry. Gold answers
+    now go through `goldreview.GoldReviewService` only; see
+    tests/test_goldreview.py for the replacement's behaviour."""
+    from aivionics.ui.adjudicator import GoldReviewWriteRemoved
+
     _seed_queue(con)
     queue = AdjudicationQueue(con)
-    queue.commit(1, "yes", correct_task_number=" 34-11-00-810-801 ")
-
-    row = con.execute(
-        "SELECT defect_id, task_number, verdict, correct_task_number, "
-        "adjudicated_at FROM label_gold").fetchone()
-    assert row[0] == 1
-    assert row[2] == "yes"
-    assert row[3] == "34-11-00-810-801"      # whitespace stripped
-    assert row[4]
+    with pytest.raises(GoldReviewWriteRemoved):
+        queue.commit(1, "yes")
+    assert con.execute("SELECT COUNT(*) FROM label_gold").fetchone()[0] == 0
     assert con.execute(
-        "SELECT done FROM gold_queue WHERE seq=1").fetchone()[0] == 1
+        "SELECT done FROM gold_queue WHERE seq=1").fetchone()[0] == 0
 
 
-def test_unsure_is_a_first_class_verdict(con):
+def test_unsure_remains_a_first_class_verdict(con):
     """PLAN §5: forcing a guess into three buckets is what ruins a gold set."""
     _seed_queue(con)
-    queue = AdjudicationQueue(con)
-    queue.commit(1, "unsure")
-    assert queue.progress().unsure == 1
     assert set(VERDICT_KEYS.values()) == {"yes", "no", "partial", "unsure"}
-
-
-def test_an_invalid_verdict_is_refused(con):
-    _seed_queue(con)
-    with pytest.raises(ValueError):
-        AdjudicationQueue(con).commit(1, "probably")
-
-
-def test_re_adjudicating_replaces_rather_than_duplicates(con):
-    _seed_queue(con)
-    queue = AdjudicationQueue(con)
-    queue.commit(2, "no")
-    queue.commit(2, "partial", correct_task_number="34-11-01-810-801")
-    rows = con.execute(
-        "SELECT verdict, correct_task_number FROM label_gold").fetchall()
-    assert rows == [("partial", "34-11-01-810-801")]
 
 
 def test_navigation_and_resume(con):
@@ -322,8 +323,10 @@ def test_navigation_and_resume(con):
     queue = AdjudicationQueue(con)
     assert queue.resume_seq() == 1
 
-    queue.commit(1, "yes")
-    queue.commit(2, "no")
+    # setup only: the reader is what these tests exercise, and the legacy
+    # write path is closed (see test_the_legacy_write_path_is_closed)
+    _mark_done(con, 1, "yes")
+    _mark_done(con, 2, "no")
     assert queue.resume_seq() == 3, "resumes at the first pending pair"
 
     assert queue.next_seq(3) == 4
@@ -338,7 +341,7 @@ def test_navigation_and_resume(con):
 def test_progress_reports_totals_and_strata(con):
     _seed_queue(con, n=5)
     queue = AdjudicationQueue(con)
-    queue.commit(1, "yes")
+    _mark_done(con, 1, "yes")
     progress = queue.progress()
     assert (progress.done, progress.total) == (1, 5)
     assert progress.pct == pytest.approx(20.0)
@@ -349,8 +352,10 @@ def test_progress_reports_totals_and_strata(con):
 def test_resume_holds_at_the_end_when_everything_is_done(con):
     _seed_queue(con, n=2)
     queue = AdjudicationQueue(con)
-    queue.commit(1, "yes")
-    queue.commit(2, "no")
+    # setup only: the reader is what these tests exercise, and the legacy
+    # write path is closed (see test_the_legacy_write_path_is_closed)
+    _mark_done(con, 1, "yes")
+    _mark_done(con, 2, "no")
     assert queue.resume_seq() == 2
     assert queue.progress().done == 2
 
@@ -386,9 +391,13 @@ def test_corpus_reader_degrades_gracefully_without_a_database():
                                "aircraft": 0}
 
 
-def test_online_features_default_to_off(con):
+def test_online_features_default_to_on(con):
+    """Owner decision 2026-08-21 (BACKLOG R6). This reverses the original
+    posture, so it is asserted rather than assumed: a fresh database starts
+    permitted, and the switch still turns it off completely."""
+    assert store.online_enabled(con) is True
+    store.set_setting(con, "online_enabled", "0")
     assert store.online_enabled(con) is False
-    assert store.online_enabled(None) is False
     store.set_setting(con, "online_enabled", "1")
     assert store.online_enabled(con) is True
 
@@ -396,7 +405,7 @@ def test_online_features_default_to_off(con):
 def test_settings_tolerate_a_database_without_the_table(tmp_path):
     path = tmp_path / "bare.db"
     bare = sqlite3.connect(path)
-    assert store.get_setting(bare, "online_enabled") == "0"
+    assert store.get_setting(bare, "online_enabled") == "1"
     assert store.get_setting(None, "theme") == "light"
     bare.close()
 
@@ -536,13 +545,31 @@ def test_page_index_caches_lookups(tmp_path):
     assert index.find(pdf, "34-11-01-400-801") is None
 
 
-def test_viewer_offers_no_export_path():
-    """Standing rule 1: the viewer reads, it never produces a copy."""
+def test_the_viewer_cannot_export_a_file():
+    """PLAN standing rule 1 said the viewer never produces a copy. The owner
+    reversed that on 2026-08-25 to permit *printing* a page range.
+
+    Printing to paper and exporting a file are different risks: a printed
+    sheet carries the provenance stamped onto it, whereas an exported PDF is
+    an unmarked duplicate of controlled data that can be mailed onward. The
+    export path therefore stays closed.
+    """
     from pathlib import Path
     source = Path("src/aivionics/ui/pdfview.py").read_text(encoding="utf-8")
-    for forbidden in ("QFileDialog", "getSaveFileName", "QPrinter",
-                      "QPrintDialog", "doc.save(", "writer.write"):
+    for forbidden in ("QFileDialog", "getSaveFileName", "doc.save(",
+                      "writer.write"):
         assert forbidden not in source, f"{forbidden} must not appear in the viewer"
+
+
+def test_every_printed_page_carries_its_provenance():
+    """A loose sheet can outlive the revision it came from, so each one is
+    stamped UNCONTROLLED COPY and names its source page, manual and time."""
+    from pathlib import Path
+    source = Path("src/aivionics/ui/pdfview.py").read_text(encoding="utf-8")
+    assert "UNCONTROLLED COPY" in source
+    assert "source page" in source
+    assert "Verify against the controlled revision" in source
+    assert "printed " in source
 
 
 # ── login dialog: rendering ─────────────────────────────────────────────
@@ -586,6 +613,21 @@ def _shown_login(qt_app, connection, theme):
     for _ in range(10):
         qt_app.processEvents()
     return dialog
+
+
+def test_virgin_database_opens_secure_first_run_setup(qt_app, tmp_path):
+    connection = db.connect(tmp_path / "first-run-admin.db")
+    auth.seed(connection)
+    dialog = _shown_login(qt_app, connection, "light")
+    try:
+        assert dialog.user == auth.unclaimed_setup_user(connection)
+        assert dialog.stack.currentIndex() == 1
+        assert "Create administrator" in dialog.windowTitle()
+        assert not auth.authenticate(connection, "admin",
+                                    "aivionics-setup").ok
+    finally:
+        dialog.close()
+        connection.close()
 
 
 def _window_button(dialog, name):
@@ -745,3 +787,371 @@ def test_the_lockup_is_drawn_unstretched_and_tight(qt_app):
         assert 0 < margin <= 6, (
             f"{path.name} leaves {margin:.1f} units empty on the right; the "
             f"lockup cannot sit centred")
+
+
+# ── the rail: section names, collapsing, and a dimmed item you can see ──
+# BACKLOG items 3 and 4. The rail's two modes and the native window styles
+# are both things that look fine in code review and are wrong on screen, so
+# they are asserted against the real widget rather than against intent.
+
+def _rail(qt_app, expanded: bool):
+    from PySide6.QtCore import Qt
+
+    from aivionics.ui import fonts
+    from aivionics.ui.widgets import Rail
+
+    qt_app.setStyleSheet(fonts.qss("light"))
+    rail = Rail("light", expanded=expanded)
+    rail.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    rail.resize(rail.width(), 700)
+    rail.show()
+    for _ in range(4):
+        qt_app.processEvents()
+    return rail
+
+
+def test_expanded_rail_carries_every_section_name(qt_app):
+    rail = _rail(qt_app, expanded=True)
+    expected = {label for _key, label, _glyph in rail.ITEMS}
+    expected.add(rail.ADMIN[1])
+    assert {b.text() for b in rail.buttons.values()} == expected
+    assert rail.width() == rail.WIDTH_EXPANDED
+    rail.close()
+
+
+def test_collapsed_rail_drops_the_names_but_never_the_labelling(qt_app):
+    """Icon-only is a visual mode, not a loss of information: the tooltip and
+    the accessible name are what a screen reader and a hover both read."""
+    rail = _rail(qt_app, expanded=False)
+    assert all(b.text() == "" for b in rail.buttons.values())
+    assert rail.width() == rail.WIDTH
+    for key, label, _glyph in rail.ITEMS:
+        assert rail.buttons[key].accessibleName() == label
+    assert rail.buttons["home"].toolTip() == "Home"
+    rail.close()
+
+
+def test_the_collapse_control_reports_the_new_state(qt_app):
+    rail = _rail(qt_app, expanded=True)
+    seen: list[bool] = []
+    rail.expanded_changed.connect(seen.append)
+
+    rail.set_expanded(False, animate=False)
+    assert seen == [False] and rail.width() == rail.WIDTH
+    rail.set_expanded(True, animate=False)
+    assert seen == [False, True] and rail.width() == rail.WIDTH_EXPANDED
+
+    rail.set_expanded(True, animate=False)
+    assert seen == [False, True], "setting the mode it is already in is not a change"
+    rail.close()
+
+
+def test_the_rail_mode_is_remembered(con):
+    """It is a preference, not a session state — see MainWindow.remember_rail_state."""
+    assert store.get_setting(con, "rail_expanded") == "1"
+    store.set_setting(con, "rail_expanded", "0")
+    assert store.get_setting(con, "rail_expanded") == "0"
+
+
+def _icon_contrast(image, rect) -> float:
+    """How far the strongest pixel of an item's *icon* gets from its ground.
+
+    Deliberately not the whole button: with the rail expanded the section name
+    sits in the same rectangle at full contrast, and a scan that includes it
+    reports a healthy number no matter what the icon is doing. The band is the
+    left edge of the item, where the 19 px glyph is drawn.
+    """
+    def lum(colour):
+        return 0.299 * colour.red() + 0.587 * colour.green() + 0.114 * colour.blue()
+
+    # Widget geometry is in logical pixels and the grab is in device ones. On
+    # a 125% display that is a 25% drift, which quietly moves the scan onto a
+    # different item — the reading stays plausible and stops meaning anything.
+    ratio = image.devicePixelRatio() or 1.0
+
+    def at(x: float, y: float):
+        return image.pixelColor(int(x * ratio), int(y * ratio))
+
+    ground = lum(at(rect.left() + 2, rect.top() + 2))
+    return max(abs(lum(at(x, y)) - ground)
+               for x in range(rect.left() + 6, rect.left() + 36)
+               for y in range(rect.top() + 6, rect.bottom() - 6))
+
+
+def test_the_dimmed_ops_item_is_dimmed_and_not_erased(qt_app):
+    """Ops greys out when the online switch is off (PLAN §4A.1 rule 4).
+
+    It used to be painted in $hair, which on this rail's own gradient is not
+    grey — it is gone. Quieter than its neighbours, still legible, is the
+    whole of the requirement, and only pixels can tell the two apart.
+    """
+    rail = _rail(qt_app, expanded=True)
+    rail.set_online_enabled(False)
+    for _ in range(4):
+        qt_app.processEvents()
+    image = rail.grab().toImage()
+
+    dimmed = _icon_contrast(image, rail.buttons["ops"].geometry())
+    normal = _icon_contrast(image, rail.buttons["fleet"].geometry())
+    assert dimmed > 25, f"the dimmed Ops item is invisible (contrast {dimmed:.0f})"
+    assert dimmed < normal, "dimmed has to be quieter than a normal item"
+    rail.close()
+
+
+# ── the frameless window keeps the desktop's own behaviour ──────────────
+
+def test_native_frame_styles_are_restored(qt_app):
+    """BACKLOG item 3. Without WS_CAPTION and WS_MINIMIZEBOX on the native
+    handle, Windows does not animate a minimise — the window just vanishes.
+    Qt strips both when the frame is turned off, so they are put back."""
+    import sys
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget
+
+    from aivionics.ui import nativewindow
+
+    window = QWidget()
+    window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+    window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window.show()
+    try:
+        restored = nativewindow.restore_native_frame(window)
+        if sys.platform != "win32":
+            assert restored is False, "no claim is made off Windows"
+            return
+        assert restored is True
+        import ctypes
+        style = ctypes.windll.user32.GetWindowLongW(
+            int(window.winId()), nativewindow.GWL_STYLE)
+        for name in ("WS_CAPTION", "WS_THICKFRAME", "WS_MINIMIZEBOX",
+                     "WS_MAXIMIZEBOX", "WS_SYSMENU"):
+            assert style & getattr(nativewindow, name), f"{name} is missing"
+    finally:
+        window.close()
+
+
+def test_a_message_that_is_not_ours_is_left_to_qt(qt_app):
+    from PySide6.QtWidgets import QWidget
+
+    from aivionics.ui import nativewindow
+    assert nativewindow.handle_native_event(QWidget(), b"xcb_generic_event", 0) is None
+
+
+# ── Home says what to do when there is nothing to show ──────────────────
+
+def test_home_leads_with_the_first_run_notice_when_the_corpus_is_empty(qt_app, tmp_path):
+    """BACKLOG item 1. Three em-dashes and a row of NO DATA badges report the
+    state accurately and give the operator nothing to act on."""
+    from aivionics.ui import fonts
+    from aivionics.ui.app import build_context
+    from aivionics.ui.pages.home import HomePage
+
+    qt_app.setStyleSheet(fonts.qss("light"))
+    ctx = build_context(tmp_path / "empty.db")
+    ctx.user = auth.User(1, "s.asadli", "Sarvan Asadli", "engineer", False)
+    page = HomePage(ctx)
+
+    assert not page.first_run.isHidden()
+    assert str(tmp_path) in page.first_run.where.text(), (
+        "the notice has to name the database it actually opened")
+
+    ctx.corpus.counts = lambda: {"tasks": 2426, "amm": 2426, "fim": 0,
+                                 "cases": 0, "aircraft": 0}
+    page.on_shown()
+    assert page.first_run.isHidden(), "it is a first-run notice, not a banner"
+    page.close()
+
+
+# ── the online badge reports a live fact, not a stored permission ───────
+# BACKLOG item 5, owner's decision 2026-08-21: the badge has to mean what
+# everybody reads it to mean. ONLINE needs both halves — permission from
+# Admin and an actual route off the machine — and neither one alone.
+
+def _shell(qt_app, tmp_path):
+    from PySide6.QtCore import Qt
+
+    from aivionics.ui import fonts
+    from aivionics.ui.app import MainWindow, build_context
+
+    ctx = build_context(tmp_path / "shell.db")
+    qt_app.setStyleSheet(fonts.qss(ctx.theme_name))
+    ctx.user = auth.User(1, "s.asadli", "Sarvan Asadli", "engineer", False)
+    window = MainWindow(ctx)
+    window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window.show()
+    for _ in range(4):
+        qt_app.processEvents()
+    return window
+
+
+def test_online_needs_both_permission_and_a_route(qt_app, tmp_path):
+    window = _shell(qt_app, tmp_path)
+    try:
+        seen = {}
+        for permitted in (False, True):
+            for reachable in (False, True):
+                window.ctx.online_enabled = permitted
+                window.reachability.is_reachable = lambda r=reachable: r
+                window.refresh_online_badge()
+                seen[(permitted, reachable)] = window.titlebar.badge.text()
+
+        assert seen[(True, True)] == "ONLINE"
+        assert seen[(True, False)] == "OFFLINE", "a route is required"
+        assert seen[(False, True)] == "OFFLINE", (
+            "the switch is off, so this machine is making no connection — "
+            "badging ONLINE would announce one that does not exist")
+        assert seen[(False, False)] == "OFFLINE"
+    finally:
+        window.close()
+
+
+def test_the_two_reasons_for_offline_are_distinguishable(qt_app, tmp_path):
+    """Same word, different cause. The tooltip is where the difference lives —
+    'switched off in Admin' is a decision, 'no route' is a fault to chase."""
+    window = _shell(qt_app, tmp_path)
+    try:
+        window.ctx.online_enabled = False
+        window.reachability.is_reachable = lambda: True
+        window.refresh_online_badge()
+        switched_off = window.titlebar.badge.toolTip()
+
+        window.ctx.online_enabled = True
+        window.reachability.is_reachable = lambda: False
+        window.refresh_online_badge()
+        unreachable = window.titlebar.badge.toolTip()
+
+        assert "Admin" in switched_off
+        assert "no route" in unreachable
+        assert switched_off != unreachable
+    finally:
+        window.close()
+
+
+def test_the_badge_follows_the_cable(qt_app, tmp_path):
+    """Pull it out, push it back in — with nothing else called in between."""
+    window = _shell(qt_app, tmp_path)
+    try:
+        window.ctx.online_enabled = True
+        window.reachability.is_reachable = lambda: True
+        window.refresh_online_badge()
+        assert window.titlebar.badge.text() == "ONLINE"
+
+        window.reachability.is_reachable = lambda: False
+        window.reachability.changed.emit(False)
+        assert window.titlebar.badge.text() == "OFFLINE"
+
+        window.reachability.is_reachable = lambda: True
+        window.reachability.changed.emit(True)
+        assert window.titlebar.badge.text() == "ONLINE"
+    finally:
+        window.close()
+
+
+def test_online_is_the_accent_and_never_a_status_colour(qt_app, tmp_path):
+    """Green for ONLINE and red for OFFLINE would say a disconnected machine
+    is faulty. This one is designed to run with the cable out — that reading
+    is what got the badge questioned. The accent carries no status meaning."""
+    window = _shell(qt_app, tmp_path)
+    try:
+        window.ctx.online_enabled = True
+        window.reachability.is_reachable = lambda: True
+        window.refresh_online_badge()
+        assert window.titlebar.badge.property("live") is True
+
+        window.reachability.is_reachable = lambda: False
+        window.refresh_online_badge()
+        assert window.titlebar.badge.property("live") is False
+    finally:
+        window.close()
+    assert T.accent_is_status_free()
+
+
+def test_reachability_maps_a_local_only_network_to_offline(qt_app):
+    """`Local` and `Site` mean a network was found and the internet was not —
+    which is precisely the case this badge exists to get right."""
+    from PySide6.QtNetwork import QNetworkInformation
+
+    from aivionics.ui.connectivity import Reachability
+
+    watcher = Reachability()
+    if not watcher.supported:
+        pytest.skip("no QNetworkInformation backend on this platform")
+
+    states = QNetworkInformation.Reachability
+
+    class _Stub:
+        def __init__(self, value):
+            self.value = value
+
+        def reachability(self):
+            return self.value
+
+    for state, expected in ((states.Online, True), (states.Unknown, True),
+                            (states.Local, False), (states.Site, False),
+                            (states.Disconnected, False)):
+        watcher._info = _Stub(state)
+        assert watcher.is_reachable() is expected, state
+
+
+def test_an_unavailable_backend_is_not_reported_as_a_disconnection(qt_app):
+    """An unknown state is not evidence of a fault. Badging OFFLINE on a guess
+    is the failure this whole change replaces."""
+    from aivionics.ui.connectivity import Reachability
+
+    watcher = Reachability()
+    watcher._info = None
+    assert watcher.supported is False
+    assert watcher.is_reachable() is True
+    assert watcher.backend_name() == "none"
+
+
+# ── the title bar describes the corpus, not one manual out of it ─────────
+
+def _manual(aircraft, kind, revision="R1", current=1):
+    return dict(aircraft_type=aircraft, manual_type=kind, revision=revision,
+                revision_date="2018-02-27", is_current=current)
+
+
+def test_the_titlebar_names_every_current_manual_not_just_the_first():
+    """It used to render `next(m for m in manuals if m["is_current"])`.
+
+    With a 737-8 AMM and a 737-8 FIM both current, AMM sorted first and the
+    FIM was simply absent from the interface — 5,768 of 8,194 task locators,
+    70% of the shipped corpus, unnamed anywhere in the chrome.
+    """
+    from aivionics.ui.app import corpus_context
+
+    text = corpus_context([_manual("737-8", "AMM", "2018-02-27"),
+                           _manual("737-8", "FIM", "2017-08-15")])
+    assert "AMM" in text and "FIM" in text
+    assert "2 current manuals" in text
+
+
+def test_the_titlebar_does_not_name_one_aircraft_for_a_multi_type_corpus():
+    """A single aircraft type in the application chrome makes a multi-type
+    tool look like a single-type one."""
+    from aivionics.ui.app import corpus_context
+
+    two = corpus_context([_manual("737-8", "AMM"), _manual("A320", "AMM")])
+    assert "737-8" in two and "A320" in two
+
+    many = corpus_context([_manual("737-8", "AMM"), _manual("A320", "AMM"),
+                           _manual("E175", "FIM"), _manual("CRJ900", "AMM")])
+    assert "4 aircraft types" in many
+    assert "737-8" not in many, "no single type may stand for the whole corpus"
+
+
+def test_the_titlebar_still_names_a_single_manual_precisely():
+    from aivionics.ui.app import corpus_context
+
+    text = corpus_context([_manual("737-8", "AMM", "2018-02-27")])
+    assert "737-8" in text and "AMM Rev 2018-02-27" in text
+
+
+def test_the_titlebar_reports_an_empty_or_superseded_corpus_honestly():
+    from aivionics.ui.app import corpus_context
+
+    assert corpus_context([]) == "No manual corpus loaded"
+    assert corpus_context([_manual("737-8", "AMM", current=0)]) == \
+        "No manual corpus loaded"

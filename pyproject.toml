@@ -9,10 +9,15 @@ dependencies = [
     "flashrank",
     "sqlite-vec",
     "PySide6",
+    "QtAwesome>=1.3,<2",
     "pyqtgraph",
     "bcrypt",
     "timezonefinder",
     "pymupdf",
+    # Secure API-key storage. On Windows this resolves to the
+    # WinVaultKeyring backend (Credential Manager); AIvionics refuses to
+    # persist a key at all when no secure backend is present.
+    "keyring>=24,<26",
 ]
 
 [project.optional-dependencies]

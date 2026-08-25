@@ -1,32 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="AIvionics">
-  <!-- AIvionics mark — CONCEPT B, DARK TILE.
-       Rebuilt as vector from the reference: rounded tile, circular dial,
-       sky above, a diagnostic trace crossing it. Two deliberate changes:
-       the trace is an avionics signal (flat, one deflection) rather than an
-       ECG pulse, and the left bars are set as clean decreasing index tabs so
-       they read as a manual index instead of noise.
-       No text in the icon — it is illegible below 32px and the OS renders the
-       app name beside it anyway. Use logo-b-*.svg for the lockup. -->
   <title>AIvionics</title>
-  <defs>
-    <clipPath id="bd"><circle cx="32" cy="30" r="19"/></clipPath>
-    <linearGradient id="skyD" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/>
-    </linearGradient>
-  </defs>
+  <!-- The AIvionics mark (dark) - an ATA locator: a reticle sitting on one
+       line of an index. Chosen by the owner on 2026-08-24 over two attitude
+       indicators, on the strength of its 16 px silhouette and because it draws
+       what the product does rather than what the industry looks like.
 
-  <rect x="3" y="3" width="58" height="58" rx="15" fill="#0F1C29" stroke="#7FB6DC" stroke-width="2"/>
-  <circle cx="32" cy="30" r="19" fill="#FFFFFF"/>
-  <g clip-path="url(#bd)">
-    <rect x="13" y="11" width="38" height="19" fill="url(#skyD)"/>
-    <g fill="#5A6B7C">
-      <rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/>
-      <rect x="12" y="26.0" width="11" height="2.4" rx="1.2"/>
-      <rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/>
-      <rect x="12" y="37.2" width="9"  height="2.4" rx="1.2"/>
-    </g>
-    <path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51"
-          fill="none" stroke="#2E9BE0" stroke-width="2.6"
-          stroke-linecap="round" stroke-linejoin="round"/>
+       No `clip-path` anywhere: Qt's SVG renderer is SVG Tiny 1.2 and ignores
+       clipPath, which is what made the pre-22-August mark paint its sky as a
+       square overhanging the dial. Every shape here is a primitive. -->
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="#0F1C29" stroke="#9FC7E4" stroke-width="2"/>
+  <g fill="#22394E">
+    <rect x="12" y="14.5" width="26" height="3.4" rx="1.7"/>
+    <rect x="12" y="45.6" width="20" height="3.4" rx="1.7"/>
   </g>
+  <rect x="12" y="30.3" width="40" height="3.4" rx="1.7" fill="#5BB4F0"/>
+  <circle cx="38" cy="32" r="11.5" fill="none" stroke="#9FC7E4" stroke-width="2.4"/>
+  <g stroke="#9FC7E4" stroke-width="2.2" stroke-linecap="round">
+    <path d="M38 17.5 V22"/><path d="M38 42 V46.5"/>
+    <path d="M23.5 32 H28"/><path d="M48 32 H52.5"/>
+  </g>
+  <circle cx="38" cy="32" r="3.2" fill="#5BB4F0"/>
 </svg>

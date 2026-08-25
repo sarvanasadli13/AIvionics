@@ -24,6 +24,14 @@ from PySide6.QtSvg import QSvgRenderer                       # noqa: E402
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 SOURCE = ROOT / "assets" / "icons" / "mark-light.svg"
+
+# Below about 24 px the index rules and the reticle ticks stop being detail
+# and start being noise, so a simplified form of the same mark is used. This
+# is only worth doing because these frames are rendered at their final size
+# rather than downsampled from 256.
+SMALL_SOURCE = ROOT / "assets" / "icons" / "mark-small-light.svg"
+SMALL_UP_TO = 24
+
 TARGET = ROOT / "packaging" / "aivionics.ico"
 
 
@@ -62,7 +70,8 @@ def main() -> int:
     app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
     _ = app
     tmp = Path(tempfile.mkdtemp(prefix="aivionics-icon-"))
-    frames = [to_pillow(render(SOURCE, s), tmp, s) for s in SIZES]
+    frames = [to_pillow(render(SMALL_SOURCE if s <= SMALL_UP_TO else SOURCE,
+                              s), tmp, s) for s in SIZES]
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     # Pillow writes every supplied size into the .ico when `sizes` names them.
     frames[-1].save(TARGET, format="ICO",

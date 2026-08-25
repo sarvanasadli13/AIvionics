@@ -37,6 +37,8 @@ can state provenance rather than implying freshness.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import time
@@ -72,6 +74,27 @@ HOST_REGISTRY: tuple[Host, ...] = (
          "Live ADS-B positions and airport arrivals/departures",
          "OpenSky Network free tier — anonymous, credit-limited, "
          "coverage incomplete by design"),
+    Host("api.adsb.lol",
+         "Live aircraft positions for the fleet map and the traffic layer",
+         "adsb.lol community network — data published under ODbL 1.0: "
+         "attribution required, share-alike, commercial use permitted"),
+    Host("api.rainviewer.com",
+         "Which radar frames exist right now (a small JSON index)",
+         "RainViewer public API — free for NON-COMMERCIAL use, attribution "
+         "required and rendered on the map"),
+    Host("tilecache.rainviewer.com",
+         "The radar images themselves, as map tiles",
+         "RainViewer public API — free for NON-COMMERCIAL use, attribution "
+         "required and rendered on the map"),
+    Host("en.wikipedia.org",
+         "One photograph per airport, and its credit line",
+         "Wikimedia REST API — article images are CC-BY-SA or public domain; "
+         "the credit and licence are fetched with the picture and shown "
+         "beside it"),
+    Host("upload.wikimedia.org",
+         "The airport photographs themselves",
+         "Wikimedia Commons — per-file licence, carried with the image and "
+         "displayed under it"),
 )
 
 ALLOWED_HOSTS: tuple[str, ...] = tuple(h.host for h in HOST_REGISTRY)
@@ -89,6 +112,13 @@ DEFAULT_TIMEOUT = 8.0          # hard ceiling on any single call, seconds
 DEFAULT_RETRIES = 2            # attempts after the first, on transient errors
 DEFAULT_BACKOFF = 0.6          # seconds; doubled per retry
 DEFAULT_MIN_INTERVAL = 5.0     # seconds between calls to the same source
+
+# Per-source overrides. The default exists to protect OpenSky's daily credit
+# budget from a screen that refreshes in a loop. A tile cache is the opposite
+# case: one view is thirty small images off a CDN, and five seconds apart
+# would make a radar layer take two and a half minutes to appear. Populated
+# by the modules that own the source, so the number sits next to the reason.
+SOURCE_MIN_INTERVAL: dict[str, float] = {}
 
 OFFLINE_REASON = ("online features are switched off — enable them in Admin "
                   "to fetch this")
@@ -121,6 +151,27 @@ def check_url(url: str) -> None:
         raise HostNotAllowed(
             f"{url!r} is not in the outbound allow-list "
             f"({', '.join(ALLOWED_HOSTS)}) or is not https")
+
+
+class _AllowlistedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when its target passes the same allow-list.
+
+    ``urllib`` follows redirects inside ``urlopen``.  Checking only the URL
+    handed to :class:`NetClient` would therefore allow an approved host to
+    bounce the request to an undeclared destination before this module saw
+    it.  Keep the policy at the actual socket boundary as well.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            check_url(newurl)
+        except HostNotAllowed as exc:
+            raise urllib.error.URLError(
+                "redirect target is outside the outbound allow-list") from exc
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_URL_OPENER = urllib.request.build_opener(_AllowlistedRedirectHandler())
 
 
 # ── the result type ─────────────────────────────────────────────────────
@@ -179,12 +230,15 @@ class RateLimiter:
         self.clock = clock
         self._last: dict[str, float] = {}
 
+    def interval_for(self, source: str) -> float:
+        return SOURCE_MIN_INTERVAL.get(source, self.min_interval)
+
     def wait_for(self, source: str) -> float:
         """Seconds the caller must wait before `source` may be called again."""
         last = self._last.get(source)
         if last is None:
             return 0.0
-        return max(0.0, self.min_interval - (self.clock() - last))
+        return max(0.0, self.interval_for(source) - (self.clock() - last))
 
     def mark(self, source: str) -> None:
         self._last[source] = self.clock()
@@ -227,23 +281,33 @@ class DiskCache:
             return None
         return body, fetched_at
 
-    def peek(self, url: str) -> tuple[str, datetime] | None:
-        """Return the entry regardless of age — the fallback when a fetch fails."""
+    def peek(self, url: str) -> tuple[str | bytes, datetime] | None:
+        """Return the entry regardless of age — the fallback when a fetch fails.
+
+        A binary body is stored base64 in the same envelope and marked, so one
+        cache directory serves both and an older entry still reads.
+        """
         path = self._path(url)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            return raw["body"], datetime.fromisoformat(raw["fetched_at"])
-        except (OSError, ValueError, KeyError):
+            body = raw["body"]
+            if raw.get("binary"):
+                body = base64.b64decode(body)
+            return body, datetime.fromisoformat(raw["fetched_at"])
+        except (OSError, ValueError, KeyError, binascii.Error):
             path.unlink(missing_ok=True)
             return None
 
-    def put(self, url: str, body: str, source: str,
+    def put(self, url: str, body: str | bytes, source: str,
             now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
+        binary = isinstance(body, (bytes, bytearray))
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             self._path(url).write_text(json.dumps({
-                "url": url, "source": source, "body": body,
+                "url": url, "source": source, "binary": binary,
+                "body": (base64.b64encode(bytes(body)).decode("ascii")
+                         if binary else body),
                 "fetched_at": now.isoformat(),
             }), encoding="utf-8")
         except OSError:
@@ -261,9 +325,19 @@ def _urllib_transport(url: str, timeout: float) -> tuple[int, str]:
     request = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT, "Accept": "application/json, text/plain",
     })
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _URL_OPENER.open(request, timeout=timeout) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         return response.status, response.read().decode(charset, errors="replace")
+
+
+def _urllib_bytes_transport(url: str, timeout: float) -> tuple[int, bytes]:
+    """The same transport, undecoded. A PNG put through `str.decode` is a
+    corrupted PNG, and nothing downstream would say so."""
+    request = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT, "Accept": "image/png, image/*",
+    })
+    with _URL_OPENER.open(request, timeout=timeout) as response:
+        return response.status, response.read()
 
 
 class TransientError(Exception):
@@ -288,10 +362,23 @@ class NetClient:
     retries: int = DEFAULT_RETRIES
     backoff: float = DEFAULT_BACKOFF
     transport: Callable[[str, float], tuple[int, str]] = _urllib_transport
+    binary_transport: Callable[[str, float], tuple[int, bytes]] = (
+        _urllib_bytes_transport)
     sleep: Callable[[float], None] = time.sleep
     log: "FetchLog" = field(default_factory=lambda: ACTIVITY)
 
-    def get(self, url: str, source: str, ttl: float = 120.0) -> Fetch:
+    def get_bytes(self, url: str, source: str, ttl: float = 900.0) -> Fetch:
+        """`get`, for a body that is not text — map tiles, images.
+
+        Deliberately the same method, not a second network path: the master
+        switch, the allow-list, the rate limiter, the cache and the activity
+        log all apply identically. `net` says it is the only object permitted
+        to make a request, and imagery is not an exception to that.
+        """
+        return self.get(url, source, ttl, binary=True)
+
+    def get(self, url: str, source: str, ttl: float = 120.0,
+            binary: bool = False) -> Fetch:
         """Fetch `url`, or say precisely why not. Never raises for I/O.
 
         Order matters and is not negotiable: the master switch is checked
@@ -331,7 +418,7 @@ class NetClient:
                          error=f"rate limited — {source} may be called again in "
                                f"{waiting:.0f} s")
 
-        body, error = self._attempt(url, source)
+        body, error = self._attempt(url, source, binary=binary)
         if body is not None:
             now = datetime.now(timezone.utc)
             self.cache.put(url, body, source, now)
@@ -361,14 +448,16 @@ class NetClient:
                      fetched_at=fetched.fetched_at, from_cache=fetched.from_cache,
                      stale=fetched.stale, url=url)
 
-    def _attempt(self, url: str, source: str) -> tuple[str | None, str]:
+    def _attempt(self, url: str, source: str,
+                 binary: bool = False) -> tuple[str | bytes | None, str]:
         """One call plus its retries. Returns (body, error message)."""
         delay = self.backoff
         last = "unreachable"
+        transport = self.binary_transport if binary else self.transport
         for attempt in range(self.retries + 1):
             self.limiter.mark(source)
             try:
-                status, body = self.transport(url, self.timeout)
+                status, body = transport(url, self.timeout)
             except urllib.error.HTTPError as exc:
                 if exc.code in (408, 429, 500, 502, 503, 504):
                     last = f"{source} returned HTTP {exc.code}"

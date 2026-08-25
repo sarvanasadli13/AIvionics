@@ -16,6 +16,14 @@ this becomes dangerous:
   would exhaust the allowance before lunch. The TTL is derived from that
   arithmetic, not chosen for feel.
 
+* **The movement endpoints are not live and never were.** `flights/arrival`
+  and `flights/departure` are rebuilt by a batch process at night, per
+  OpenSky's own documentation. Everything built on them carries `recorded` in
+  its name (Phase 8) because they used to sit in a panel called "Movements"
+  next to live positions, which reads as the current picture and is not. A
+  registered account raises the credit allowance from 400 to 4,000 a day and
+  changes the lag not at all.
+
 Tails are matched to transponder addresses through `aircraft.icao24`, the
 column `compliance.ensure_schema` adds. An aircraft with no `icao24` on file
 cannot be tracked, and that too is reported rather than silently skipped.
@@ -37,9 +45,37 @@ BASE = "https://opensky-network.org/api"
 STATES_TTL = 300.0
 FLIGHTS_TTL = 900.0
 
+# The longest a caller may block waiting out the rate limiter before giving
+# up and letting the panel say so. Only ever paid on a worker thread.
+SOURCE_WAIT_CEILING = 6.0
+
 # OpenSky serves flight history with a delay and rejects windows over 7 days.
 FLIGHTS_WINDOW = timedelta(hours=12)
 FLIGHTS_MAX_WINDOW = timedelta(days=7)
+
+# What the flights endpoints are actually worth, anonymously. This is not a
+# hedge: EDDF returned a single arrival for a twelve-hour window in testing.
+# A panel that prints "1 recorded" without this line is telling the reader
+# something false about Frankfurt.
+#
+# The first sentence was added in Phase 8 and is the one that matters most,
+# because it is a fact from OpenSky's own documentation rather than an
+# inference from a test: the flights tables are *"updated by a batch process
+# at night"*. Nothing built on them is live, whatever the rest of the screen
+# happens to be doing, and a registered account raises the credit allowance
+# without touching the lag.
+MOVEMENTS_WARNING = (
+    "RECORDED HISTORY, NOT LIVE. OpenSky rebuilds its arrival and departure "
+    "tables in a nightly batch, so this list lags by hours and today's "
+    "movements may be missing entirely. "
+    "OpenSky attributes movements from where a track started or stopped, and "
+    "the anonymous free tier sees only a fraction of them, hours late. A short "
+    "list is a limit of this feed, not a quiet airport \u2014 do not read the "
+    "count as traffic.")
+
+# The heading a recorded-movements panel carries. Kept beside the warning so
+# the two cannot drift apart.
+MOVEMENTS_LABEL = "Recorded movements \u2014 nightly batch, hours behind"
 
 COVERAGE_WARNING = (
     "OpenSky is a volunteer ADS-B receiver network with incomplete coverage "
@@ -54,6 +90,14 @@ _ICAO24 = re.compile(r"^[0-9a-f]{6}$")
 METRES_TO_FEET = 3.280839895
 MS_TO_KNOTS = 1.943844
 MS_TO_FPM = 196.850394
+
+# After this long without a contact, a marker is drawn as stale rather than
+# as current. Two minutes is a compromise from the feeds themselves: adsb.lol
+# refreshes positions every few seconds where it has receivers, so a gap this
+# long means the aircraft has left coverage rather than that the network is
+# slow. Below a minute the markers at the edge of a receiver's range would
+# flicker between fresh and stale on every fetch.
+STALE_AFTER_S = 120.0
 
 
 def normalise_icao24(value: object) -> str:
@@ -79,6 +123,21 @@ class StateVector:
     vertical_rate_ms: float | None = None
     squawk: str = ""
     last_contact: datetime | None = None
+    # Published by community feeds (adsb.lol), never by OpenSky's anonymous
+    # state vectors. Blank means "this feed did not say", not "unregistered".
+    registration: str = ""
+    aircraft_type: str = ""
+    # Which feed said this. Carried on the vector rather than inferred at the
+    # call site because two feeds now populate the same model, they disagree
+    # about which fields exist, and a readout that cannot name its source
+    # cannot be checked by the person reading it.
+    source: str = ""
+
+    @property
+    def identity(self) -> str:
+        """What to call this aircraft on screen, best available first."""
+        return (self.registration or self.callsign.strip()
+                or self.icao24.upper())
 
     @property
     def has_position(self) -> bool:
@@ -127,14 +186,42 @@ class StateVector:
             return "level"
         return f"{'climbing' if rate > 0 else 'descending'} {abs(rate):,} fpm"
 
-    def age_text(self, now: datetime | None = None) -> str:
+    def age_seconds(self, now: datetime | None = None) -> float | None:
         if self.last_contact is None:
-            return "last contact not reported"
+            return None
         now = now or datetime.now(timezone.utc)
-        seconds = max(0, int((now - self.last_contact).total_seconds()))
+        return max(0.0, (now - self.last_contact).total_seconds())
+
+    def age_text(self, now: datetime | None = None) -> str:
+        seconds = self.age_seconds(now)
+        if seconds is None:
+            return "last contact not reported"
+        seconds = int(seconds)
         if seconds < 90:
             return f"last seen {seconds} s ago"
         return f"last seen {seconds // 60} min ago"
+
+    def is_stale(self, now: datetime | None = None,
+                 limit: float = None) -> bool:
+        """True when this position is too old to be treated as where it is now.
+
+        A vector with no `last_contact` counts as stale rather than fresh. The
+        feed not saying when it saw an aircraft is not evidence that it saw it
+        just now, and the safe reading of an unknown age is the pessimistic
+        one — a marker drawn as current on a five-minute-old position is a
+        marker in the wrong place with nothing on screen to say so.
+        """
+        seconds = self.age_seconds(now)
+        return True if seconds is None else seconds > (
+            STALE_AFTER_S if limit is None else limit)
+
+    def position_text(self) -> str:
+        if not self.has_position:
+            return "position not reported"
+        return f"{self.latitude:.4f}, {self.longitude:.4f}"
+
+    def source_text(self) -> str:
+        return self.source or "source not recorded"
 
 
 def _f(value: object) -> float | None:
@@ -180,7 +267,55 @@ def parse_state(row: list) -> StateVector | None:
         geo_altitude_m=_f(row[13]) if len(row) > 13 else None,
         squawk=str(row[14] or "").strip() if len(row) > 14 else "",
         last_contact=_stamp(row[4]),
+        source=SOURCE,
     )
+
+
+# ── finding one aircraft among several hundred (Phase 8) ────────────────
+# A busy European view is three hundred chevrons, and picking the one you
+# came for by eye is not a thing anybody does twice. Four identifiers are
+# accepted because four are in circulation and people arrive with whichever
+# one their paperwork used: the tail, the callsign, the transponder address
+# and the type.
+
+def state_rank(state: StateVector, query: str) -> int:
+    """How well `state` answers `query`. Lower is better, -1 is no match.
+
+    Exact identifiers beat prefixes and prefixes beat the type, because a
+    type search matches every 737 in the sky and an exact tail matches one
+    aircraft. Sorting on this rather than filtering keeps the best answer at
+    the top instead of whichever aircraft the feed happened to list first.
+    """
+    wanted = (query or "").strip().upper().replace("-", "")
+    if len(wanted) < 2:
+        return -1
+    tail = state.registration.upper().replace("-", "")
+    callsign = state.callsign.strip().upper()
+    address = state.icao24.upper()
+    kind = state.aircraft_type.upper()
+
+    if wanted in (tail, address, callsign):
+        return 0
+    if tail.startswith(wanted) or address.startswith(wanted):
+        return 1
+    if callsign.startswith(wanted):
+        return 2
+    if wanted in tail or wanted in callsign:
+        return 3
+    if kind and (kind == wanted or kind.startswith(wanted)):
+        return 4
+    return -1
+
+
+def search_states(states, query: str, limit: int = 40) -> list[StateVector]:
+    """Every aircraft in `states` matching `query`, best first."""
+    scored = []
+    for state in states or ():
+        rank = state_rank(state, query)
+        if rank >= 0:
+            scored.append((rank, state.identity, state))
+    scored.sort(key=lambda row: (row[0], row[1]))
+    return [state for _rank, _identity, state in scored[:limit]]
 
 
 # ── tails ───────────────────────────────────────────────────────────────
@@ -231,6 +366,167 @@ def states_url(icao24s: list[str] | tuple[str, ...]) -> str:
     addresses = sorted({normalise_icao24(a) for a in icao24s} - {""})
     query = urlencode([("icao24", address) for address in addresses])
     return f"{BASE}/states/all?{query}"
+
+
+# Area queries (BACKLOG R2). The module note is emphatic that `states/all`
+# *unfiltered* is not to be used, and that stands: what follows is always
+# bounded by the rectangle currently on screen, which is a small fraction of
+# the world and gets smaller the further in you go. The zoom floor below is
+# the practical expression of that rule - a continent-sized box is refused
+# rather than sent.
+AREA_TTL = 60.0
+AREA_MAX_SPAN_DEG = 30.0        # refuse a box larger than this on either axis
+AREA_MAX_AIRCRAFT = 900         # a sanity cap on what gets drawn
+
+
+def area_url(lat_min: float, lon_min: float,
+             lat_max: float, lon_max: float) -> str:
+    """States inside one bounding box. Never the unfiltered world feed."""
+    query = urlencode({"lamin": round(float(lat_min), 4),
+                       "lomin": round(float(lon_min), 4),
+                       "lamax": round(float(lat_max), 4),
+                       "lomax": round(float(lon_max), 4)})
+    return f"{BASE}/states/all?{query}"
+
+
+def area_too_large(lat_min: float, lon_min: float,
+                   lat_max: float, lon_max: float) -> bool:
+    return (abs(lat_max - lat_min) > AREA_MAX_SPAN_DEG
+            or abs(lon_max - lon_min) > AREA_MAX_SPAN_DEG)
+
+
+@dataclass(frozen=True)
+class AreaTraffic:
+    """Everything the network saw inside one box, plus why it might be empty."""
+
+    fetch: Fetch
+    states: tuple = ()
+    bounds: tuple = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.fetch.ok
+
+    def summary(self) -> str:
+        if not self.fetch.ok:
+            return self.fetch.error or "not fetched"
+        return (f"{len(self.states):,} aircraft in view"
+                if self.states else "no aircraft in view")
+
+
+def area_traffic(client: NetClient, lat_min: float, lon_min: float,
+                 lat_max: float, lon_max: float, *,
+                 ttl: float = AREA_TTL) -> AreaTraffic:
+    """Live traffic inside the visible rectangle (R2).
+
+    Returns an `AreaTraffic` in every case, offline included, so the caller
+    renders a reason rather than an empty map with no explanation.
+    """
+    bounds = (lat_min, lon_min, lat_max, lon_max)
+    if area_too_large(*bounds):
+        return AreaTraffic(
+            fetch=Fetch(source=SOURCE,
+                        error="zoom in to load live traffic - the visible "
+                              "area is too large to request"),
+            bounds=bounds)
+
+    fetched = client.get_json(area_url(*bounds), SOURCE, ttl=ttl)
+    if not fetched.ok:
+        return AreaTraffic(fetch=fetched, bounds=bounds)
+
+    payload = fetched.data if isinstance(fetched.data, dict) else {}
+    states = []
+    for row in payload.get("states") or []:
+        state = parse_state(row)
+        if state is not None and state.has_position:
+            states.append(state)
+        if len(states) >= AREA_MAX_AIRCRAFT:
+            break
+    return AreaTraffic(fetch=fetched, states=tuple(states), bounds=bounds)
+
+
+# ── what an empty map means (Phase 8) ───────────────────────────────────
+# A map with no markers on it has at least five different causes and they
+# call for five different responses, but they all look identical: an empty
+# rectangle. Left unlabelled, the reader supplies the most dangerous reading
+# themselves — "there are no aircraft here". Every one of these states is
+# rendered on the map, in words, over the empty space.
+
+TRACKING_OK = "ok"
+TRACKING_LOADING = "loading"
+TRACKING_OFFLINE = "offline"
+TRACKING_STALE = "stale"
+TRACKING_NO_COVERAGE = "no-coverage"
+TRACKING_ZOOMED_OUT = "zoomed-out"
+TRACKING_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class TrackingState:
+    """Why the map looks the way it does, in words the map itself renders."""
+
+    state: str = TRACKING_LOADING
+    headline: str = ""
+    detail: str = ""
+
+    @property
+    def is_ok(self) -> bool:
+        return self.state == TRACKING_OK
+
+    @property
+    def blank_is_explained(self) -> bool:
+        """True when this state gives the reader a reason for an empty map."""
+        return bool(self.headline) and self.state != TRACKING_OK
+
+    def line(self) -> str:
+        return " — ".join(part for part in (self.headline, self.detail) if part)
+
+
+def tracking_state(*, online: bool, traffic: "AreaTraffic | None" = None,
+                   loading: bool = False,
+                   now: datetime | None = None) -> TrackingState:
+    """Classify the traffic layer. Pure, so the wording can be tested.
+
+    Ordered by what the reader most needs to know first: a switched-off
+    application explains every other symptom, so it is checked before
+    anything that would otherwise look like a coverage problem.
+    """
+    if not online:
+        return TrackingState(
+            TRACKING_OFFLINE, "Live tracking is off",
+            "Online features are switched off in Admin. Nothing is being "
+            "fetched, so this map is not showing an absence of aircraft — it "
+            "is not looking.")
+    if loading or traffic is None:
+        return TrackingState(TRACKING_LOADING, "Loading live traffic…", "")
+    if not traffic.ok:
+        error = traffic.fetch.error or "not fetched"
+        if "zoom in" in error.lower():
+            return TrackingState(
+                TRACKING_ZOOMED_OUT, "Zoomed out too far to load traffic",
+                "The visible area is wider than one request may cover. Zoom "
+                "in; nothing has been fetched for this view.")
+        return TrackingState(
+            TRACKING_ERROR, "Live traffic unavailable", error)
+    if not traffic.states:
+        return TrackingState(
+            TRACKING_NO_COVERAGE, "Nothing seen in this area",
+            "The network returned no aircraft here. Volunteer receiver "
+            "coverage is dense over Europe and North America and absent "
+            "elsewhere — Baku returned zero aircraft on every network tried. "
+            "This is not a report that the sky is empty.")
+    if traffic.fetch.stale:
+        return TrackingState(
+            TRACKING_STALE, "Showing the last positions that arrived",
+            "The live fetch failed and these came from the cache. Every "
+            "marker is where an aircraft was, not where it is.")
+    stale = [s for s in traffic.states if s.is_stale(now)]
+    if len(stale) == len(traffic.states):
+        return TrackingState(
+            TRACKING_STALE, "Positions are stale",
+            f"No contact newer than {int(STALE_AFTER_S)} s. Markers are where "
+            f"these aircraft were last seen, not where they are.")
+    return TrackingState(TRACKING_OK, "", "")
 
 
 @dataclass(frozen=True)
@@ -329,7 +625,16 @@ def fleet_positions(client: NetClient, con: sqlite3.Connection | None, *,
                          untracked=untracked, at=_stamp(payload.get("time")))
 
 
-# ── arrivals and departures ─────────────────────────────────────────────
+# ── recorded arrivals and departures ────────────────────────────────────
+# Renamed in Phase 8, and the rename is the point. These endpoints were being
+# rendered beside live positions in a panel called "Movements", which reads as
+# "what is happening at this airport now". They are not that: OpenSky's own
+# documentation says the flights tables are updated by a batch process at
+# night. Everything here now carries `recorded` in its name so that a caller
+# cannot wire it into a live view without noticing what it is doing. The
+# provider-independent domain that decides when to use this at all lives in
+# `ops/movements.py`.
+
 
 @dataclass(frozen=True)
 class Flight:
@@ -390,8 +695,13 @@ def parse_flight(row: dict) -> Flight | None:
 
 
 @dataclass(frozen=True)
-class Movements:
-    """Arrivals or departures for one airport, with the window they cover."""
+class RecordedMovements:
+    """Recorded arrivals or departures for one airport, and the window covered.
+
+    `label()` is not decoration: this object is the only thing a panel has to
+    tell it what it is holding, and the one mistake worth engineering against
+    is a screen presenting a nightly batch as the current picture.
+    """
 
     fetch: Fetch
     airport: str = ""
@@ -404,6 +714,9 @@ class Movements:
     def ok(self) -> bool:
         return self.fetch.ok
 
+    def label(self) -> str:
+        return MOVEMENTS_LABEL
+
     def window_text(self) -> str:
         if self.since is None or self.until is None:
             return ""
@@ -414,20 +727,23 @@ class Movements:
         return self.fetch.provenance()
 
 
-def fetch_movements(client: NetClient, airport: str, *, arriving: bool,
-                    window: timedelta = FLIGHTS_WINDOW,
-                    now: datetime | None = None,
-                    ttl: float = FLIGHTS_TTL) -> Movements:
-    """Arrivals or departures at `airport` over the last `window`.
+def fetch_recorded_movements(client: NetClient, airport: str, *,
+                             arriving: bool,
+                             window: timedelta = FLIGHTS_WINDOW,
+                             now: datetime | None = None,
+                             ttl: float = FLIGHTS_TTL) -> RecordedMovements:
+    """Recorded arrivals or departures at `airport` over the last `window`.
 
-    The airport at each end is OpenSky's estimate from where a track started
-    or stopped, not a filed flight plan. `Flight.uncertain` says when even
-    that estimate had competing candidates.
+    Recorded, not current: see `MOVEMENTS_WARNING`. The airport at each end is
+    OpenSky's estimate from where a track started or stopped, not a filed
+    flight plan, and `Flight.uncertain` says when even that estimate had
+    competing candidates.
     """
     icao = (airport or "").strip().upper()
     if not icao:
-        return Movements(fetch=Fetch(source=SOURCE, error="no airport selected"),
-                         arriving=arriving)
+        return RecordedMovements(
+            fetch=Fetch(source=SOURCE, error="no airport selected"),
+            arriving=arriving)
     now = now or datetime.now(timezone.utc)
     span = min(window, FLIGHTS_MAX_WINDOW)
     since = now - span
@@ -435,8 +751,8 @@ def fetch_movements(client: NetClient, airport: str, *, arriving: bool,
                        int(since.timestamp()), int(now.timestamp()))
     fetched = client.get_json(url, SOURCE, ttl=ttl)
     if not fetched.ok:
-        return Movements(fetch=fetched, airport=icao, arriving=arriving,
-                         since=since, until=now)
+        return RecordedMovements(fetch=fetched, airport=icao,
+                                 arriving=arriving, since=since, until=now)
 
     rows = fetched.data if isinstance(fetched.data, list) else []
     flights = [flight for flight in (parse_flight(row) for row in rows)
@@ -446,22 +762,25 @@ def fetch_movements(client: NetClient, airport: str, *, arriving: bool,
     if not flights:
         # OpenSky answers an airport with no recorded movements with an empty
         # list, which is a real answer and not a failure. Say which it is.
-        return Movements(
+        return RecordedMovements(
             fetch=Fetch(source=fetched.source, url=fetched.url,
                         fetched_at=fetched.fetched_at,
                         from_cache=fetched.from_cache, stale=fetched.stale,
                         error=f"no {'arrivals' if arriving else 'departures'} "
-                              f"recorded at {icao} in this window — the free "
-                              f"tier's coverage is incomplete and its history "
-                              f"lags by several hours"),
+                              f"recorded at {icao} in this window — this is a "
+                              f"nightly batch, so today's movements may not "
+                              f"be in it yet; the free tier's coverage is "
+                              f"incomplete and its history lags by hours"),
             airport=icao, arriving=arriving, since=since, until=now)
-    return Movements(fetch=fetched, airport=icao, arriving=arriving,
-                     flights=tuple(flights), since=since, until=now)
+    return RecordedMovements(fetch=fetched, airport=icao, arriving=arriving,
+                             flights=tuple(flights), since=since, until=now)
 
 
-def fetch_arrivals(client: NetClient, airport: str, **kw) -> Movements:
-    return fetch_movements(client, airport, arriving=True, **kw)
+def fetch_recorded_arrivals(client: NetClient, airport: str,
+                            **kw) -> RecordedMovements:
+    return fetch_recorded_movements(client, airport, arriving=True, **kw)
 
 
-def fetch_departures(client: NetClient, airport: str, **kw) -> Movements:
-    return fetch_movements(client, airport, arriving=False, **kw)
+def fetch_recorded_departures(client: NetClient, airport: str,
+                              **kw) -> RecordedMovements:
+    return fetch_recorded_movements(client, airport, arriving=False, **kw)

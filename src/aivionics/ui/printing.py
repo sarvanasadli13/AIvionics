@@ -84,8 +84,21 @@ def print_locator(con: sqlite3.Connection, task: Mapping,
                   manual: Mapping | None = None,
                   aircraft: Mapping | None = None,
                   user=None) -> str:
-    """Format the locator, log the print, return the text to render."""
+    """Format the locator, log the print, return the text to render.
+
+    A locator is a maintenance instruction: it sends an engineer to a task in
+    a controlled manual. Training material carries no task numbers and is not
+    controlled data, so it may never appear on one — refused here rather than
+    only hidden in the UI, because this function is what a printed sheet is
+    made from.
+    """
+    from .. import documents
     from .auth import signature
+
+    if manual is not None and not documents.is_maintenance(manual):
+        raise ValueError(
+            "A locator can only cite maintenance data. This document is "
+            f"{documents.CLASS_LABELS.get((manual.get('doc_class') or ''), 'not maintenance data')}.")
 
     text = format_locator(task, manual, aircraft, signed_by=signature(user))
     record_print(con,

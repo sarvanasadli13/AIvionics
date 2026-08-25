@@ -11,17 +11,18 @@ built yet the page shows an empty state naming the script to run.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QFont
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
-                               QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QPushButton, QStackedWidget, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from ... import documents as DOCS
 from .. import pdfsource
 from .. import theme as T
 from ..pdfview import PdfViewer
-from ..widgets import (AtaLocator, EmptyState, Placard, SectionHeader,
+from ..widgets import (StatusBadge, AtaLocator, EmptyState, Placard, SectionHeader,
                        Splitter, Tag, mono_font, ui_font)
 from .base import Page, caption
 
@@ -45,7 +46,8 @@ class ManualsPage(Page):
         outer.addWidget(self._selector_band())
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._browser())
+        self.browser = self._browser()
+        self.stack.addWidget(self.browser)
         self.empty = EmptyState(
             "mdi6.database-off-outline",
             "No manual corpus in this database",
@@ -56,7 +58,8 @@ class ManualsPage(Page):
         self.stack.addWidget(self.empty)
 
         self.viewer = PdfViewer(self.theme_name)
-        self.viewer.closed.connect(lambda: self.stack.setCurrentIndex(0))
+        self.viewer.closed.connect(
+            lambda: self.stack.setCurrentWidget(self.browser))
         self.stack.addWidget(self.viewer)
 
         outer.addWidget(self.stack, 1)
@@ -86,6 +89,16 @@ class ManualsPage(Page):
         self.manual_combo.currentIndexChanged.connect(self._on_manual_changed)
         self.revision_combo.currentIndexChanged.connect(self._on_revision_changed)
 
+        # What kind of document this is, in words, next to the thing it
+        # describes. Training material is useful reference; it is not
+        # maintenance data, and the interface never lets the two look alike.
+        cls = QVBoxLayout()
+        cls.setSpacing(3)
+        cls.addWidget(Placard("Document class"))
+        self.class_badge = StatusBadge("ok", "maintenance data", self.theme_name)
+        cls.addWidget(self.class_badge)
+        lay.addLayout(cls)
+
         lay.addStretch(1)
         cov = QVBoxLayout()
         cov.setSpacing(3)
@@ -94,6 +107,24 @@ class ManualsPage(Page):
         self.coverage_summary.setFont(ui_font(10, QFont.Weight.DemiBold, tabular=True))
         cov.addWidget(self.coverage_summary)
         lay.addLayout(cov)
+
+        actions = QVBoxLayout()
+        actions.setSpacing(3)
+        actions.addWidget(Placard("Documents"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.add_btn = QPushButton("Add…")
+        self.add_btn.setToolTip("Add a manual or training document from this PC")
+        self.add_btn.clicked.connect(self.add_document)
+        row.addWidget(self.add_btn)
+        self.remove_btn = QPushButton("Remove…")
+        self.remove_btn.setToolTip("Remove the selected document from the corpus")
+        self.remove_btn.clicked.connect(self.remove_document)
+        row.addWidget(self.remove_btn)
+        wrap = QWidget()
+        wrap.setLayout(row)
+        actions.addWidget(wrap)
+        lay.addLayout(actions)
         return band
 
     # ── browser ───────────────────────────────────────────────────────
@@ -182,10 +213,10 @@ class ManualsPage(Page):
         corpus = self.ctx.corpus if self.ctx else None
         self.manuals = corpus.manuals() if corpus else []
         if not self.manuals:
-            self.stack.setCurrentIndex(1)
+            self.stack.setCurrentWidget(self.empty)
             self.coverage_summary.setText("no corpus")
             return
-        self.stack.setCurrentIndex(0)
+        self.stack.setCurrentWidget(self.browser)
         types = sorted({m["aircraft_type"] for m in self.manuals})
         self.type_combo.blockSignals(True)
         self.type_combo.clear()
@@ -219,13 +250,92 @@ class ManualsPage(Page):
 
     def _on_revision_changed(self) -> None:
         self.current_manual = self.revision_combo.currentData()
+        if self.current_manual:
+            # Selection state is authoritative.  If the page ever displayed
+            # its empty state, choosing a real manual must immediately restore
+            # the browser instead of updating controls over a stale panel.
+            self.stack.setCurrentWidget(self.browser)
+        self._refresh_class_badge()
         self._populate_tree()
+        self._offer_whole_document()
+
+    def _offer_whole_document(self) -> None:
+        """A document with no task index is still readable as a document.
+
+        Task-indexed manuals are opened *at a task*, which is the point of the
+        locator workflow. A training PDF has no tasks to open at, so without
+        this it could be added to the corpus and then never read — which is
+        what happened.
+        """
+        manual = self.current_manual or {}
+        source = manual.get("source_file") or ""
+        whole = bool(source) and source.lower().endswith(
+            (".pdf", ".docx", ".doc")) and not self._has_tasks(manual)
+        self._whole_document = whole
+        self.current_chapter = None
+        self.current_task = None
+        if whole:
+            self.open_btn.setText("Open document")
+            self.open_btn.setToolTip(
+                "Open this document in the read-only viewer. It has no task "
+                "index, so it opens at page 1.")
+            self.open_btn.setEnabled(True)
+        else:
+            # Both branches must set every control they touch. Setting them
+            # only in the `whole` branch left the previous document's label
+            # and enabled-state behind when the selection changed.
+            self.open_btn.setText("Open in manual")
+            self.open_btn.setToolTip(
+                "Open the chapter PDF inside the app at this task's page")
+            self.open_btn.setEnabled(False)
+        self.print_btn.setEnabled(False)
+
+    def _has_tasks(self, manual: dict) -> bool:
+        if not manual or not self.ctx:
+            return False
+        corpus = getattr(self.ctx, "corpus", None)
+        return bool(corpus and corpus.has_tasks(manual.get("id")))
+
+    def _refresh_class_badge(self) -> None:
+        """Say in words what the selected document is.
+
+        `DOCS.is_maintenance` reads the `doc_class` column rather than the
+        manual's name, so a training document called "AMM" is still badged
+        as training.
+        """
+        manual = self.current_manual or {}
+        maintenance = DOCS.is_maintenance(manual) if manual else True
+        self.class_badge.kind = "ok" if maintenance else "warn"
+        self.class_badge.override = ("maintenance data" if maintenance
+                                     else "TRAINING — not maintenance data")
+        self.class_badge.refresh_theme(self.theme_name)
+        self.class_badge.setToolTip(
+            "Task numbers from this document may be cited on a locator."
+            if maintenance else
+            "Training material. It explains how the system works; it carries "
+            "no ATA task numbers and is never cited as a maintenance task.")
 
     def _populate_tree(self) -> None:
         self.tree.clear()
         manual = self.current_manual
         if not manual or not self.ctx:
             self.coverage_summary.setText("—")
+            return
+        if not self._has_tasks(manual):
+            # Not a failure: training material is organised by topic, not by
+            # ATA task number, so there is no task index to show. Say that,
+            # rather than presenting an empty tree that reads as broken.
+            item = QTreeWidgetItem(self.tree)
+            item.setText(0, "No task index")
+            item.setText(1, "This document is organised by topic, not by ATA "
+                            "task number. Use \u201cOpen document\u201d to read it.")
+            item.setDisabled(True)
+            self.coverage_summary.setText("no task index")
+            self.detail_title.setText(
+                manual.get("display_title") or "Document")
+            self.detail_effectivity.setText(
+                "Training material carries no effectivity and is never cited "
+                "as a maintenance task.")
             return
         chapters = self.ctx.corpus.chapters(manual["id"])
         pal = T.THEMES[self.theme_name]
@@ -235,7 +345,18 @@ class ManualsPage(Page):
             item.setText(0, f"ATA {ch['chapter']}")
             item.setFont(0, mono_font(10))
             n = ch["tasks"]
-            item.setText(1, f"{n} task{'' if n == 1 else 's'} extracted")
+            label = f"{n} task{'' if n == 1 else 's'} extracted"
+            if not self._chapter_readable(ch["chapter"]):
+                # Say it here, in the list, rather than after the reader has
+                # committed to opening it. The tasks were extracted before the
+                # file was damaged, so they remain listed and usable.
+                label += "  ·  PDF cannot be opened"
+                item.setForeground(1, QBrush(QColor(pal["amb"])))
+                item.setToolTip(
+                    1, "This chapter's PDF renders no pages and is pending "
+                       "repair (PLAN 1.1). The extracted tasks below are "
+                       "still valid; only the page images are unavailable.")
+            item.setText(1, label)
             pct = ch["pct"]
             if pct is None:
                 item.setText(2, "not measured")
@@ -341,6 +462,103 @@ class ManualsPage(Page):
         self.open_btn.setEnabled(True)
         self.print_btn.setEnabled(False)
 
+    # ── documents ─────────────────────────────────────────────────────
+    def add_document(self) -> None:
+        """Pick a file, say what it is, and add it once the operator agrees."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Add a manual or training document", "",
+            "Documents (*.pdf *.docx *.doc);;All files (*)")
+        if not path:
+            return
+        found = DOCS.inspect(path)
+        if not found.readable:
+            QMessageBox.warning(self, "Cannot add this document", found.reason)
+            return
+
+        kind = ("maintenance data" if found.is_maintenance
+                else "TRAINING MATERIAL — not maintenance data")
+        detail = (f"{Path(path).name}\n\n"
+                  f"Reads as: {kind}\n"
+                  f"Aircraft: {found.aircraft_type or 'not detected'}\n"
+                  f"Type: {found.manual_type}   ·   {found.pages:,} pages\n\n"
+                  f"{found.reason}")
+        if QMessageBox.question(
+                self, "Add this document?", detail,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            DOCS.add_document(self.ctx.con, path)
+        except DOCS.DocumentError as exc:
+            QMessageBox.warning(self, "Not added", str(exc))
+            return
+        self.on_shown()
+        if self.ctx and getattr(self.ctx, "window", None):
+            self.ctx.window.apply_context()
+
+    def remove_document(self) -> None:
+        """Remove the selected document, refusing to break locators silently."""
+        manual = self.current_manual
+        if not manual:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select a manual to remove.")
+            return
+        name = (f"{manual.get('aircraft_type', '—')} "
+                f"{manual.get('manual_type', '—')} "
+                f"Rev {manual.get('revision', '—')}")
+        try:
+            DOCS.remove_document(self.ctx.con, manual["id"])
+        except DOCS.DocumentError as exc:
+            # The refusal names the cost; the operator decides whether to pay it.
+            if "Confirm explicitly" not in str(exc):
+                QMessageBox.warning(self, "Not removed", str(exc))
+                return
+            if QMessageBox.question(
+                    self, "Remove this manual and its tasks?",
+                    f"{name}\n\n{exc}",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.Cancel
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                DOCS.remove_document(self.ctx.con, manual["id"], force=True)
+            except DOCS.DocumentError as inner:
+                QMessageBox.warning(self, "Not removed", str(inner))
+                return
+        self.current_manual = None
+        self.on_shown()
+        if self.ctx and getattr(self.ctx, "window", None):
+            self.ctx.window.apply_context()
+
+    def _chapter_readable(self, chapter: str) -> bool:
+        """Whether this chapter's PDF renders any pages.
+
+        Cached per manual for the session: the answer is a property of the
+        file, and probing sixteen PDFs on every tree rebuild would be felt.
+        """
+        manual = self.current_manual or {}
+        key = (manual.get("id"), chapter)
+        cache = getattr(self, "_readable_cache", None)
+        if cache is None:
+            cache = self._readable_cache = {}
+        if key in cache:
+            return cache[key]
+        ok = True
+        path = self._chapter_pdf(chapter)
+        if path is None:
+            ok = False
+        else:
+            try:
+                import fitz
+                doc = fitz.open(str(path))
+                ok = len(doc) > 0
+                doc.close()
+            except Exception:                                    # noqa: BLE001
+                ok = False
+        cache[key] = ok
+        return ok
+
     # ── the PDF viewer ────────────────────────────────────────────────
     def _chapter_pdf(self, chapter: str):
         source = (self.current_manual or {}).get("source_file")
@@ -353,11 +571,25 @@ class ManualsPage(Page):
         it runs behind a wait cursor and is cached per task for the session.
         A missing drive is reported by the viewer, not raised.
         """
+        manual = self.current_manual or {}
         chapter = self.current_chapter
+
+        if getattr(self, "_whole_document", False) and not chapter:
+            # A document with no task index: open the file itself at page 1.
+            from pathlib import Path as _Path
+            path = _Path(manual.get("source_file") or "")
+            label = manual.get("display_title") or path.name
+            kind = ("" if DOCS.is_maintenance(manual)
+                    else "  ·  TRAINING MATERIAL — not maintenance data")
+            self.stack.setCurrentWidget(self.viewer)
+            self.viewer.open(path if path.exists() else None,
+                             f"{manual.get('aircraft_type', '—')} · {label}{kind}",
+                             None)
+            return
+
         if not chapter:
             return
         path = self._chapter_pdf(chapter)
-        manual = self.current_manual or {}
         context = (f"{manual.get('aircraft_type', '—')} · "
                    f"{manual.get('manual_type', '—')} Rev {manual.get('revision', '—')}"
                    f" · ATA {chapter}")
@@ -380,7 +612,21 @@ class ManualsPage(Page):
         # Switch first: fit-to-width measures the viewport, which is only
         # correct once the viewer is the visible page of the stack.
         self.stack.setCurrentWidget(self.viewer)
-        self.viewer.open(path, context, page)
+        if not self.viewer.open(path, context, page):
+            # Do not leave the reader on an error screen with only a "back"
+            # link. Six chapters of this AMM render no pages, so a second
+            # damaged chapter showed the identical message and looked as
+            # though the first one had never closed. Return to the tree and
+            # say which chapter failed, so the next click is an informed one.
+            self.stack.setCurrentWidget(self.browser)
+            QMessageBox.warning(
+                self, f"ATA {chapter} cannot be opened",
+                f"{context}\n\n"
+                "This chapter's PDF renders no pages and is pending repair "
+                "(PLAN 1.1). Six chapters of this AMM are affected and are "
+                "marked in the tree.\n\n"
+                "The tasks extracted from it are still listed and still "
+                "valid — only the page images are unavailable.")
 
     def _print_locator(self) -> None:
         if self.current_task and self.ctx:

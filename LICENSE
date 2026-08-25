@@ -1,0 +1,40 @@
+MIT License
+
+Copyright (c) 2026 Sarvan Asadli
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This licence covers the AIvionics source code only.
+
+It does not grant any right to aircraft maintenance data. Aircraft
+Maintenance Manuals, Fault Isolation Manuals, Trouble Shooting Manuals and
+equivalent documents are the property of their manufacturers and are licensed
+separately to each operator. No such document is included in this repository,
+and none may be redistributed with it.
+
+AIvionics is an engineering decision-support system. It does not replace
+approved aircraft maintenance documentation, organizational procedures,
+licensed personnel or regulatory requirements. All recommendations must be
+independently verified before maintenance action.
+
+Aircraft type designations and manufacturer names appearing in this software
+are used solely to identify the equipment the software supports. They imply no
+affiliation with, sponsorship by, or endorsement from their respective owners.

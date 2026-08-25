@@ -12,7 +12,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import qtawesome as qta
-from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (QEasingCurve, QParallelAnimationGroup,
+                            QPropertyAnimation, QRect, QSize, Qt, QTimer,
+                            Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
@@ -287,15 +289,37 @@ class EmptyState(QWidget):
         self.detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # A word-wrapped QLabel reports a single-line sizeHint unless the
         # layout is told to ask heightForWidth, which silently clips the last
-        # lines. Fixing the width makes the height calculable and honoured.
+        # lines. Fixing the width makes the height calculable; declaring
+        # heightForWidth on the policy makes the layout actually ask.
+        #
+        # The height is NOT computed here. It used to be, from
+        # `fontMetrics()` at construction — and that font is not the one the
+        # label ends up with, because the stylesheet is applied afterwards.
+        # The number came out ~25% short and the last line of every empty
+        # state was quietly cropped. It is measured in `showEvent` instead,
+        # once the widget has been polished.
         self.detail.setFixedWidth(480)
-        self.detail.setMinimumHeight(
-            self.detail.fontMetrics().boundingRect(
-                0, 0, 480, 1000, int(Qt.TextFlag.TextWordWrap), detail).height() + 4)
+        policy = self.detail.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.detail.setSizePolicy(policy)
         lay.addWidget(self.icon)
         lay.addWidget(self.headline)
         lay.addWidget(self.detail, 0, Qt.AlignmentFlag.AlignHCenter)
+        # An empty state that is squeezed until its last line disappears is
+        # worse than no empty state: the text is the entire content, and a
+        # stretchy parent will otherwise happily crop it. Refusing to go below
+        # the layout's own minimum pushes the pressure onto the scroll area,
+        # which is what a scroll area is for.
+        lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
         self.refresh_theme(theme)
+
+    def showEvent(self, event):
+        """Measure the wrapped text against the font it actually has."""
+        super().showEvent(event)
+        needed = self.detail.heightForWidth(self.detail.width() or 480)
+        if needed > 0 and self.detail.minimumHeight() < needed:
+            self.detail.setMinimumHeight(needed)
+            self.updateGeometry()
 
     def refresh_theme(self, theme: str) -> None:
         pal = T.THEMES[theme]
@@ -325,11 +349,36 @@ class WorldClock(QWidget):
     def __init__(self, zones=None, theme: str = T.DEFAULT_THEME,
                  parent: QWidget | None = None):
         super().__init__(parent)
-        self.zones = zones or WORLD_CLOCK_ZONES
+        self._theme = theme
+        self.zones = list(zones or WORLD_CLOCK_ZONES)
+        self.cells: list[tuple[QLabel, QLabel, QLabel, str]] = []
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        self.cells: list[tuple[QLabel, QLabel, QLabel, str]] = []
+        self._build()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(1000)
+        self.tick()
+
+    def set_zones(self, zones) -> None:
+        """Replace the strip. Which cities matter is the operator's call, not
+        a decision baked into this file (R7)."""
+        self.zones = list(zones) or list(WORLD_CLOCK_ZONES)
+        self._build()
+        self.tick()
+        self.refresh_theme(self._theme)
+
+    def _build(self) -> None:
+        lay = self.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.cells = []
         for i, (code, zone) in enumerate(self.zones):
             cell = QWidget()
             cl = QVBoxLayout(cell)
@@ -355,11 +404,6 @@ class WorldClock(QWidget):
             self.cells.append((name, clock, day, zone))
         lay.addStretch(1)
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.tick)
-        self.timer.start(1000)
-        self.tick()
-
     def tick(self) -> None:
         for _, clock, day, zone in self.cells:
             try:
@@ -372,6 +416,7 @@ class WorldClock(QWidget):
             day.setText(now.strftime("%a %d %b"))
 
     def refresh_theme(self, theme: str) -> None:
+        self._theme = theme
         pal = T.THEMES[theme]
         for _, clock, _, _ in self.cells:
             clock.setStyleSheet(f"color:{pal['txt']};")
@@ -463,8 +508,21 @@ class TitleBar(QWidget):
     def set_context(self, text: str) -> None:
         self.context.setText(text)
 
-    def set_badge(self, text: str) -> None:
+    def set_badge(self, text: str, live: bool | None = None) -> None:
+        """`live` paints the badge in the accent; None keeps it neutral.
+
+        The accent is used rather than a status colour on purpose. Green for
+        ONLINE and red for OFFLINE would say a disconnected machine is faulty,
+        and this application is *designed* to run with the cable out — that
+        reading is the reason the badge was questioned in the first place.
+        The accent carries no status meaning here (§4A.1 rule: the accent may
+        never be red, amber or green).
+        """
         self.badge.setText(text.upper())
+        if self.badge.property("live") != live:
+            self.badge.setProperty("live", live)
+            self.badge.style().unpolish(self.badge)
+            self.badge.style().polish(self.badge)
 
     def refresh_theme(self, theme: str) -> None:
         self._theme = theme
@@ -504,7 +562,12 @@ class TitleBar(QWidget):
 
 
 class Rail(QWidget):
-    """Seven destinations plus Admin, pinned bottom and separated (§4A.1 rule 4).
+    """Nine destinations plus Admin, pinned bottom and separated (§4A.1 rule 4).
+
+    Expanded by default. The icon carries recognition, the name carries
+    certainty — a rail whose destinations can only be learnt by hovering is a
+    rail that gets guessed at. Collapsing back to icons is a deliberate choice,
+    made once and remembered (BACKLOG item 4).
 
     Ops carries the whole online-dependent surface, so it greys out as one
     item when `online_enabled` is false — standing rule 12 made visible in
@@ -512,8 +575,13 @@ class Rail(QWidget):
     """
 
     navigated = Signal(str)
+    expanded_changed = Signal(bool)
 
-    WIDTH = 58
+    WIDTH = 58              # icons only
+    WIDTH_EXPANDED = 196    # icons and section names
+    ANIM_MS = 160
+    ITEM_HEIGHT = 42
+
     ITEMS = [
         ("home", "Home", "mdi6.home-outline"),
         ("diagnose", "Diagnose", "mdi6.magnify"),
@@ -522,20 +590,45 @@ class Rail(QWidget):
         ("reliability", "Reliability", "mdi6.chart-bar"),
         ("compliance", "Compliance", "mdi6.shield-check-outline"),
         ("ops", "Ops", "mdi6.earth"),
+        # Controlled validation work, not an engineering search screen: it is
+        # hidden unless the signed-in role holds `gold_review`. Hiding it is a
+        # courtesy — MainWindow.navigate re-checks the permission.
+        ("validation", "AI Validation", "mdi6.clipboard-check-outline"),
+        ("about", "About", "mdi6.information-outline"),
     ]
     ADMIN = ("admin", "Admin", "mdi6.cog-outline")
 
-    def __init__(self, theme: str = T.DEFAULT_THEME, parent: QWidget | None = None):
+    def __init__(self, theme: str = T.DEFAULT_THEME, expanded: bool = True,
+                 parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("Rail")
-        self.setFixedWidth(self.WIDTH)
-        self.buttons: dict[str, QToolButton] = {}
+        self.buttons: dict[str, QPushButton] = {}
         self._current = "home"
+        self._expanded = bool(expanded)
+        self._online = False
+        self._theme = theme
+        self._anim: QParallelAnimationGroup | None = None
+        self.setFixedWidth(self.WIDTH_EXPANDED if self._expanded else self.WIDTH)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 7, 0, 7)
-        lay.setSpacing(3)
-        lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        lay.setContentsMargins(7, 7, 7, 7)
+        lay.setSpacing(2)
+
+        # The collapse control sits above the destinations rather than below
+        # them: it belongs to the rail, not to the list, and putting it at the
+        # bottom would set it beside Admin, which it is not.
+        self.toggle = QToolButton(self)
+        self.toggle.setObjectName("RailToggle")
+        self.toggle.setFixedSize(30, 26)
+        self.toggle.setIconSize(QSize(15, 15))
+        self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle.clicked.connect(lambda: self.set_expanded(not self._expanded))
+        self._toggle_row = QHBoxLayout()
+        self._toggle_row.setContentsMargins(0, 0, 0, 0)
+        self._toggle_row.setSpacing(0)
+        self._toggle_row.addWidget(self.toggle)
+        lay.addLayout(self._toggle_row)
+        lay.addSpacing(6)
 
         for key, label, glyph in self.ITEMS:
             lay.addWidget(self._make_button(key, label, glyph))
@@ -543,34 +636,106 @@ class Rail(QWidget):
 
         sep = QFrame()
         sep.setObjectName("RailSep")
-        sep.setFixedSize(24, 1)
-        lay.addWidget(sep, 0, Qt.AlignmentFlag.AlignHCenter)
+        sep.setFixedHeight(1)
+        lay.addWidget(sep)
         lay.addSpacing(4)
         lay.addWidget(self._make_button(*self.ADMIN))
 
+        self._apply_expanded_state()
         self.refresh_theme(theme)
         self.set_current("home")
 
-    def _make_button(self, key: str, label: str, glyph: str) -> QToolButton:
-        b = QToolButton(self)
-        b.setObjectName("RailBtn")
+    # ── construction ──────────────────────────────────────────────────
+    def set_item_visible(self, key: str, visible: bool) -> None:
+        """Show or hide one destination.
+
+        Used for permission-gated items. A hidden destination is also
+        unchecked if it was current, so the rail never shows a selection the
+        user cannot reach.
+        """
+        button = self.buttons.get(key)
+        if button is None:
+            return
+        button.setVisible(bool(visible))
+        if not visible and self._current == key:
+            button.setChecked(False)
+
+    def _make_button(self, key: str, label: str, glyph: str) -> QPushButton:
+        """A QPushButton, not a QToolButton, because only QPushButton honours
+        `text-align: left` in a stylesheet. A tool button centres icon+text as
+        one block, which would leave the icons of "Home" and "Reliability" in
+        different places and the column looking broken."""
+        b = QPushButton(self)
+        b.setObjectName("RailNav")
         b.setProperty("glyph", glyph)
+        b.setProperty("label", label)
+        b.setProperty("expanded", self._expanded)
         b.setCheckable(True)
         b.setAutoExclusive(True)
-        b.setFixedSize(44, 43)
+        b.setFixedHeight(self.ITEM_HEIGHT)
         b.setIconSize(QSize(19, 19))
+        b.setFont(ui_font(9.5, QFont.Weight.DemiBold))
         b.setToolTip(label)
         b.setAccessibleName(label)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         b.clicked.connect(lambda _=False, k=key: self.navigated.emit(k))
         self.buttons[key] = b
         return b
 
+    # ── expand / collapse ─────────────────────────────────────────────
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool, animate: bool = True) -> None:
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._apply_expanded_state()
+        target = self.WIDTH_EXPANDED if expanded else self.WIDTH
+        if animate:
+            self._animate_width(target)
+        else:
+            self.setFixedWidth(target)
+        self.refresh_theme(self._theme)
+        self.expanded_changed.emit(expanded)
+
+    def _apply_expanded_state(self) -> None:
+        """Text, stylesheet state and the toggle's position — everything that
+        changes with the mode except the width itself."""
+        for b in self.buttons.values():
+            b.setText(b.property("label") if self._expanded else "")
+            b.setProperty("expanded", self._expanded)
+            b.style().unpolish(b)
+            b.style().polish(b)
+        self._toggle_row.setAlignment(
+            self.toggle,
+            Qt.AlignmentFlag.AlignRight if self._expanded
+            else Qt.AlignmentFlag.AlignHCenter)
+
+    def _animate_width(self, target: int) -> None:
+        """Animate both width bounds together — `setFixedWidth` pins the two,
+        so animating one alone is fought by the other."""
+        if self._anim is not None:
+            self._anim.stop()
+        group = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            a = QPropertyAnimation(self, prop, group)
+            a.setDuration(self.ANIM_MS)
+            a.setStartValue(self.width())
+            a.setEndValue(target)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(a)
+        self._anim = group
+        group.start()
+
+    # ── state ─────────────────────────────────────────────────────────
     def set_current(self, key: str) -> None:
         if key in self.buttons:
             self._current = key
             self.buttons[key].setChecked(True)
-            self.refresh_theme(getattr(self, "_theme", T.DEFAULT_THEME))
+            self.refresh_theme(self._theme)
 
     def set_online_enabled(self, enabled: bool) -> None:
         """Grey the Ops item when the switch is off — but leave it reachable.
@@ -587,18 +752,31 @@ class Rail(QWidget):
             "Ops — live map, airport page, weather" if enabled else
             "Ops — online features are switched off in Admin; airport data, "
             "runways and local time still work offline")
-        self.refresh_theme(getattr(self, "_theme", T.DEFAULT_THEME))
+        self.refresh_theme(self._theme)
 
     def refresh_theme(self, theme: str) -> None:
         self._theme = theme
         pal = T.THEMES[theme]
         for key, b in self.buttons.items():
             active = key == self._current
-            colour = pal["cy"] if active else pal["txt3"]
-            if key == "ops" and not getattr(self, "_online", False) and not active:
-                colour = pal["hair"]        # dimmed, still clickable
+            dimmed = key == "ops" and not self._online and not active
+            # Three steps, and every one of them visible: active in the accent,
+            # normal in $txt2, dimmed in $txt3. The dimmed step used to be
+            # $hair, which on this rail's own gradient is not "greyed out" —
+            # it is gone. An item you cannot see is not an item you can judge.
+            colour = pal["cy"] if active else (pal["txt3"] if dimmed else pal["txt2"])
             b.setIcon(qta.icon(b.property("glyph"), color=colour,
                                color_disabled=pal["txt3"]))
+            if b.property("dimmed") != dimmed:
+                b.setProperty("dimmed", dimmed)
+                b.style().unpolish(b)
+                b.style().polish(b)
+        self.toggle.setIcon(qta.icon(
+            "mdi6.chevron-double-left" if self._expanded
+            else "mdi6.chevron-double-right", color=pal["txt3"]))
+        tip = "Collapse the rail to icons" if self._expanded else "Show section names"
+        self.toggle.setToolTip(tip)
+        self.toggle.setAccessibleName(tip)
         self.update()
 
     def paintEvent(self, event):
@@ -609,7 +787,7 @@ class Rail(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pal = T.THEMES[getattr(self, "_theme", T.DEFAULT_THEME)]
+        pal = T.THEMES[self._theme]
         p.setBrush(QColor(pal["cyf"]))
         p.setPen(Qt.PenStyle.NoPen)
         top = btn.y() + 9

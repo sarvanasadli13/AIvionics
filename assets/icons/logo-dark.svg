@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 198 64" width="198" height="64" role="img" aria-label="AIvionics">
   <!-- AIvionics horizontal lockup — DARK.
-       Mark: rounded tile, circular dial, sky above, index tabs, diagnostic trace.
+       Mark: rounded tile, ATA locator - a reticle on one line of an index.
        Wordmark: "AI" in the accent AND the capital I set in a serif face.
        Both are load-bearing — the colour carries it in normal use, the serif
        crossbars guarantee it can never be read as a lowercase "l" when the
@@ -18,27 +18,23 @@
        on the right, which pushed the lockup off-centre wherever it was
        centred as a whole). -->
   <title>AIvionics</title>
-  <defs>
-    <clipPath id="lgd"><circle cx="32" cy="30" r="19"/></clipPath>
-    <linearGradient id="sD" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#8FCBEC"/><stop offset="1" stop-color="#CFE7F6"/>
-    </linearGradient>
-  </defs>
-
-  <rect x="3" y="3" width="58" height="58" rx="15" fill="#0F1C29" stroke="#7FB6DC" stroke-width="2"/>
-  <circle cx="32" cy="30" r="19" fill="#FFFFFF"/>
-  <g clip-path="url(#lgd)">
-    <rect x="13" y="11" width="38" height="19" fill="url(#sD)"/>
-    <g fill="#5A6B7C">
-      <rect x="12" y="20.4" width="14" height="2.4" rx="1.2"/>
-      <rect x="12" y="26.0" width="11" height="2.4" rx="1.2"/>
-      <rect x="12" y="31.6" width="13" height="2.4" rx="1.2"/>
-      <rect x="12" y="37.2" width="9"  height="2.4" rx="1.2"/>
-    </g>
-    <path d="M13 30 H26 L29.5 30 L32 17.5 L34.5 41 L37 30 H51"
-          fill="none" stroke="#2E9BE0" stroke-width="2.6"
-          stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Mark: ATA locator (owner's choice, 2026-08-24). A reticle on one line
+       of an index. Identical geometry to assets/icons/mark-dark.svg, shifted
+       2 units up because the lockup tile sits at y=1 rather than y=3. No
+       `clip-path` and no gradients - every shape is a primitive, so Qt's SVG
+       Tiny renderer draws exactly what a browser does. -->
+  <rect x="3" y="1" width="58" height="58" rx="15" fill="#0F1C29" stroke="#9FC7E4" stroke-width="2"/>
+  <g fill="#22394E">
+    <rect x="12" y="12.5" width="26" height="3.4" rx="1.7"/>
+    <rect x="12" y="43.6" width="20" height="3.4" rx="1.7"/>
   </g>
+  <rect x="12" y="28.3" width="40" height="3.4" rx="1.7" fill="#5BB4F0"/>
+  <circle cx="38" cy="30" r="11.5" fill="none" stroke="#9FC7E4" stroke-width="2.4"/>
+  <g stroke="#9FC7E4" stroke-width="2.2" stroke-linecap="round">
+    <path d="M38 15.5 V20"/><path d="M38 40 V44.5"/>
+    <path d="M23.5 30 H28"/><path d="M48 30 H52.5"/>
+  </g>
+  <circle cx="38" cy="30" r="3.2" fill="#5BB4F0"/>
 
   <path fill="#5BB4F0" d="M74.22 41L81.25 21.39L86.48 21.39L93.35 41L88.7 41L87.34 37.08L80.15 37.08L78.83 41L74.22 41ZM81.16 33.47L86.29 33.47L84.2 26.62C84.13 26.37 84.06 26.15 83.99 25.94C83.93 25.74 83.87 25.5 83.82 25.22L83.69 25.22C83.64 25.45 83.58 25.67 83.52 25.89C83.45 26.11 83.38 26.34 83.3 26.59L81.16 33.47Z"/>   <!-- A -->
   <path fill="#5BB4F0" d="M104.89 41L94.13 41L94.13 39.93C94.37 39.92 94.74 39.89 95.21 39.85C95.69 39.82 96.02 39.76 96.21 39.69C96.54 39.55 96.77 39.37 96.9 39.15C97.02 38.92 97.08 38.64 97.08 38.29L97.08 24.54C97.08 24.23 97.02 23.96 96.9 23.72C96.78 23.48 96.55 23.29 96.21 23.14C95.99 23.05 95.66 22.96 95.23 22.86C94.81 22.77 94.44 22.7 94.13 22.67L94.13 21.6L104.89 21.6L104.89 22.67C104.61 22.69 104.27 22.73 103.86 22.78C103.45 22.83 103.1 22.9 102.82 22.99C102.47 23.11 102.23 23.3 102.11 23.55C101.99 23.8 101.93 24.08 101.93 24.4L101.93 38.14C101.93 38.47 102 38.75 102.12 38.98C102.24 39.22 102.48 39.4 102.82 39.55C103.01 39.63 103.33 39.71 103.77 39.79C104.21 39.87 104.59 39.92 104.89 39.93L104.89 41Z"/>   <!-- I -->

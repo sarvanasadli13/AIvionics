@@ -16,13 +16,14 @@ exception. Two things are specific to this one:
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .. import config
-from ..ops import adsb, airports, compliance, net, weather
+from ..ops import (adsb, adsblol, airports, compliance, movements as mv, net,
+                    photos, radar, weather)
 
 
 @dataclass(frozen=True)
@@ -77,12 +78,28 @@ class OpsService:
 
     def __init__(self, db_path: Path | str | None = None,
                  online: Callable[[], bool] | None = None,
-                 client: net.NetClient | None = None) -> None:
+                 client: net.NetClient | None = None,
+                 commercial: "mv.CommercialConfig | None" = None) -> None:
         self.db_path = Path(db_path or config.DB_PATH)
         self.online = online or (lambda: False)
         self.client = client or net.NetClient(online=lambda: bool(self.online()))
         self._con: sqlite3.Connection | None = None
         self._tried = False
+        # The observed-movements provider is stateful: it learns from the
+        # position fetches the map is already making rather than fetching
+        # anything of its own, so it lives for as long as the service does.
+        # Both the folding-in and the reading-out happen on pool threads, and
+        # both are plain dict and list operations on one object — no lock,
+        # because introducing one here would be the only lock in the file and
+        # would protect nothing a torn read could damage.
+        # Named for the feed `area_traffic` below actually folds in. The
+        # default was OpenSky, which fetches none of these positions, so
+        # every observed movement the screen rendered credited the wrong
+        # network — and left adsb.lol's ODbL credit off a board built from
+        # its data. The rows carry their own source now; this is the
+        # fallback for a vector that does not declare one.
+        self.observed = mv.ObservedProvider(source=adsblol.SOURCE)
+        self.commercial = commercial or mv.CommercialConfig()
 
     # ── database ──────────────────────────────────────────────────────
     def connection(self) -> sqlite3.Connection | None:
@@ -149,12 +166,102 @@ class OpsService:
         return (weather.fetch_metar(self.client, icao),
                 weather.fetch_taf(self.client, icao))
 
-    def movements(self, icao: str) -> tuple[adsb.Movements, adsb.Movements]:
-        return (adsb.fetch_arrivals(self.client, icao),
-                adsb.fetch_departures(self.client, icao))
+    def recorded_movements(self, icao: str
+                           ) -> tuple[adsb.RecordedMovements,
+                                      adsb.RecordedMovements]:
+        """OpenSky's recorded arrivals and departures, in that order.
+
+        Recorded, not live — the endpoints behind this are rebuilt by a
+        nightly batch (see `adsb.MOVEMENTS_WARNING`). It keeps its place
+        because a list of real movements from six hours ago is worth
+        something; it lost the name "movements" because that name reads as
+        "now".
+
+        These two calls hit the same source, and the rate limiter refuses
+        rather than waits - so fetching them back to back returned departures
+        as a rate-limit error every single time an airport was first opened.
+        This runs on a worker thread, so waiting out the interval is exactly
+        what it should do; blocking here blocks nothing the user can see.
+        """
+        arrivals = adsb.fetch_recorded_arrivals(self.client, icao)
+        waiting = self.client.limiter.wait_for(adsb.SOURCE)
+        if waiting > 0:
+            self.client.sleep(min(waiting, adsb.SOURCE_WAIT_CEILING))
+        return arrivals, adsb.fetch_recorded_departures(self.client, icao)
+
+    # The old name, kept because `scripts/preview_ops.py` and the round-2
+    # regression test both call it. It is an alias and not a second path.
+    movements = recorded_movements
+
+    def providers(self) -> tuple:
+        """Every movement level this installation has, best first."""
+        return mv.default_providers(self.client, observed=self.observed,
+                                    commercial=self.commercial)
+
+    def movement_boards(self, icao: str) -> tuple:
+        """(selection, arrivals, departures) from the best available level.
+
+        The selection is returned alongside the boards rather than folded
+        into them: the screen has to be able to say *why* it is showing
+        inferred ADS-B movements — because no operational system is connected
+        and no commercial provider is configured — and a board alone cannot
+        say that about the levels above it.
+        """
+        selection = mv.select(self.providers())
+        if not selection.ok:
+            empty = mv.MovementBoard(airport=(icao or "").strip().upper(),
+                                     level=mv.LEVEL_OPERATIONAL,
+                                     error=mv.OPERATIONAL_ABSENT,
+                                     state=mv.BOARD_UNAVAILABLE)
+            return selection, empty, replace(empty, arriving=False)
+        provider = selection.provider
+        arrivals = provider.arrivals(icao)
+        # Only a fetching provider pays the limiter; the observed level reads
+        # from memory and waiting on it would be a second of nothing.
+        if isinstance(provider, mv.RecordedProvider):
+            waiting = self.client.limiter.wait_for(adsb.SOURCE)
+            if waiting > 0:
+                self.client.sleep(min(waiting, adsb.SOURCE_WAIT_CEILING))
+        return selection, arrivals, provider.departures(icao)
 
     def fleet(self) -> adsb.FleetSnapshot:
-        return adsb.fleet_positions(self.client, self.connection())
+        """Fleet positions from adsb.lol, matched on the tail number.
+
+        The OpenSky path needed an ICAO 24-bit address on file for every
+        aircraft before it could show any of them; adsb.lol publishes the
+        registration, so a tail is trackable the moment it is registered.
+        """
+        return adsblol.fleet_positions(self.client, self.connection())
+
+    def area_traffic(self, bounds: tuple) -> adsb.AreaTraffic:
+        """Live contacts covering the visible rectangle.
+
+        Every successful fetch is also folded into the observed-movements
+        provider on the way past. That is free: the positions have already
+        been paid for, and a takeoff or a landing is a change of ground state
+        between two of these fetches. Asking a second endpoint for the same
+        aircraft would spend a request to learn nothing new.
+        """
+        traffic = adsblol.area_traffic(self.client, *bounds)
+        if traffic.ok:
+            self.observed.observe(traffic.states)
+        return traffic
+
+    def airport_photo(self, name: str, where: str = "") -> tuple:
+        """(photo, bytes) for one airport, or (Photo(), None) if there is
+        none. A missing photograph is a normal outcome, not a failure (R5)."""
+        photo = photos.find_photo(self.client, name, where)
+        return photo, photos.fetch_photo(self.client, photo)
+
+    def radar(self, bounds: tuple, width_px: int) -> tuple:
+        """(index, tiles) for the latest radar frame over `bounds` (R3)."""
+        index = radar.radar_index(self.client)
+        frame = index.latest
+        if frame is None:
+            return index, radar.RadarTiles(
+                error=index.fetch.error or "no radar frames published")
+        return index, radar.fetch_tiles(self.client, index, frame, bounds,
+                                        width_px)
 
     def activity(self) -> list[net.SourceActivity]:
         return self.client.log.rows()

@@ -171,9 +171,18 @@ class SearchService:
         if not self._llm_tried:
             self._llm_tried = True
             try:
-                from ..llm.client import OllamaClient
-                client = OllamaClient()
-                self._llm = client if client.health().ok else None
+                # The saved configuration, through the one shared seam, so
+                # this screen can never end up on a different model from
+                # Diagnose. `service()` returns None when no request may be
+                # made — disabled, no key, online switch off.
+                from ..llm import aiconfig
+                client = aiconfig.service(self._connect())
+                # `health.ok` alone means the endpoint answered — not that it
+                # serves the model that was asked for. A hosted catalogue
+                # lists models it will not serve, and summarising against a
+                # substitute is exactly the silent model swap the AI status
+                # exists to prevent.
+                self._llm = client if _usable(client) else None
             except Exception:                                    # noqa: BLE001
                 self._llm = None
         return self._llm
@@ -240,6 +249,13 @@ class SearchService:
         self._pool.start(_SearchJob(self, query, signals, kw))
         return True
 
+    def reload_configuration(self) -> None:
+        """Drop the cached model client so new settings take effect."""
+        from ..llm import aiconfig
+        aiconfig.invalidate()
+        self._llm = None
+        self._llm_tried = False
+
     def close(self) -> None:
         if self._con is not None:
             self._con.close()
@@ -253,6 +269,22 @@ class SearchSignals(QObject):
 
     done = Signal(object)        # the result dict
     failed = Signal(str, str)    # query, message
+
+
+def _usable(client) -> bool:
+    """Reachable, and actually serving the requested model."""
+    if client is None:
+        return False
+    try:
+        health = client.health()
+    except Exception:                                            # noqa: BLE001
+        return False
+    if not getattr(health, "ok", False):
+        return False
+    if not getattr(health, "model_present", False):
+        return False
+    usable = getattr(health, "usable", None)
+    return True if usable is None else bool(usable)
 
 
 class _SearchJob(QRunnable):
