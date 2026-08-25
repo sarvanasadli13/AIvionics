@@ -268,6 +268,33 @@ Enforced in code and in tests, not just documented.
 
 ---
 
+## Requirements
+
+| | |
+|---|---|
+| **Python** | 3.11 or newer |
+| **OS** | Windows 10/11 primarily. The application is Qt and runs elsewhere, but secure key storage resolves to Windows Credential Manager — on a machine with no secure keyring backend, AIvionics **refuses to persist an API key at all** rather than fall back to a file |
+| **RAM** | 16 GB recommended. It is built to run on an ordinary office PC |
+| **GPU** | None. Embeddings run on CPU through ONNX |
+| **Network** | Optional. The manuals core, retrieval, case base and statistics are fully local |
+
+Everything installs from `pip install -e .`:
+
+| Package | For |
+|---|---|
+| `PySide6`, `QtAwesome`, `pyqtgraph` | UI, icons, charts |
+| `pymupdf` | The in-app PDF viewer |
+| `fastembed`, `numpy`, `sqlite-vec` | Embeddings and vector search |
+| `flashrank` | The cross-encoder reranker — evaluated, **not enabled** |
+| `bcrypt` | Password hashing, cost 12 |
+| `keyring` | API-key storage in Windows Credential Manager |
+| `timezonefinder` | Offline IANA zone from lat/lon |
+
+An LLM is **optional**. Without one, the deterministic ranked-locator screen is
+complete and the application is fully usable.
+
+---
+
 ## Try it
 
 ```bash
@@ -276,6 +303,34 @@ python -m aivionics.ui
 ```
 
 Or double-click **`Start AIvionics.bat`**.
+
+### Signing in — there is no default password
+
+**AIvionics ships with no default password, and no shared setup secret.** A new
+database seeds a single `admin` account whose password is
+`secrets.token_urlsafe(48)` — a random value nobody, including the author,
+knows.
+
+On first run you **claim** that account: the application recognises the
+unclaimed local `admin`, asks you to set a password, and issues a **one-time
+recovery code** — four groups of five characters, drawn from an alphabet with
+no `I`, `O`, `0` or `1`, because it is meant to be written on paper and read
+back. **Save it.** It is the only way back into an account whose password is
+lost.
+
+Passwords must be at least 10 characters. Any later reset uses the recovery
+code — the first-run claim path is narrow by design and cannot become an
+authentication bypass for ordinary accounts.
+
+### Two roles
+
+| Role | Permissions |
+|---|---|
+| `admin` | users, roles, ingest, models, settings, audit, read, print |
+| `engineer` | read, print, notes |
+
+The same `ROLES` table governs what the **model** may call. An unknown role
+yields no permissions rather than all of them.
 
 The application ships with no corpus. To see it populated, build the demo
 database — it registers twelve **real** aircraft tails that already carry
